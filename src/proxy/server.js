@@ -58,7 +58,10 @@ export default function createProxyRouter(providers, router) {
         });
       }
 
-      const effectiveStrategy = strategy || process.env.DEFAULT_STRATEGY || 'best';
+      const VALID_STRATEGIES = new Set(['cheapest', 'fastest', 'best', 'round-robin']);
+      const effectiveStrategy = VALID_STRATEGIES.has(strategy)
+        ? strategy
+        : (process.env.DEFAULT_STRATEGY || 'best');
 
       // Validate and clamp parameters
       const safeTemperature = temperature !== undefined
@@ -224,7 +227,7 @@ export default function createProxyRouter(providers, router) {
 
   app.get('/api/stats', (req, res) => {
     try {
-      const hours = parseInt(req.query.hours) || 24;
+      const hours = Math.min(Math.max(1, parseInt(req.query.hours, 10) || 24), 720);
       const stats = getRequestStats(hours);
       const totals = stats.reduce(
         (acc, s) => ({
@@ -251,7 +254,7 @@ export default function createProxyRouter(providers, router) {
 
   app.get('/api/stats/timeline', (req, res) => {
     try {
-      const hours = parseInt(req.query.hours) || 24;
+      const hours = Math.min(Math.max(1, parseInt(req.query.hours, 10) || 24), 720);
       const timeline = getCostTimeline(hours);
       res.json({ hours, timeline });
     } catch (err) {

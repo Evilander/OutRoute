@@ -22,7 +22,12 @@ function autoSelectModels(providers, count = 3) {
   }
   if (available.length > 0) {
     // Shuffle and pick `count` models
-    const shuffled = available.sort(() => Math.random() - 0.5);
+    // Fisher-Yates shuffle for uniform distribution
+    const shuffled = [...available];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
     return shuffled.slice(0, Math.min(count, shuffled.length));
   }
   // Fallback: try defaults that might have providers
@@ -47,7 +52,7 @@ export function createArenaRouter(providers) {
       }
 
       const selectedModels = models && models.length > 0
-        ? models
+        ? models.slice(0, 8).filter(m => typeof m === 'string' && m.length <= 100)
         : autoSelectModels(providers);
 
       if (selectedModels.length < 2) {
@@ -122,6 +127,10 @@ export function createArenaRouter(providers) {
 
       if (!battle) {
         return res.status(404).json({ error: `Battle ${battleId} not found` });
+      }
+
+      if (battle.status !== 'voted') {
+        return res.status(403).json({ error: 'Vote on this battle before revealing model identities' });
       }
 
       const entries = battle.entries.map(e => ({

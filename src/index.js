@@ -87,7 +87,7 @@ async function main() {
   });
 
   // Start server
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`
   ╔═══════════════════════════════════════════════╗
   ║                                               ║
@@ -112,6 +112,20 @@ async function main() {
   ╚═══════════════════════════════════════════════╝
 `);
   });
+
+  // Graceful shutdown
+  function shutdown(signal) {
+    console.log(`\n[prism] ${signal} received, shutting down...`);
+    monitor.stop();
+    server.close(() => {
+      try { getDb().close(); } catch {}
+      console.log('[prism] Goodbye.');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 5000);
+  }
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch(err => {
