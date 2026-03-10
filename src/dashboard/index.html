@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prism — LLM Arena + Router</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="logo">
+        <div class="logo-icon">P</div>
+        <div>
+          <h1>Prism</h1>
+          <div class="logo-subtitle">LLM Arena + Intelligent Router</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="provider-count" class="stat-label">— providers</span>
+        <span id="uptime-badge" class="model-badge openai">Live</span>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="arena">Arena</button>
+      <button class="tab" data-tab="leaderboard">Leaderboard</button>
+      <button class="tab" data-tab="requests">Request Log</button>
+    </div>
+
+    <!-- DASHBOARD TAB -->
+    <section id="tab-dashboard" class="section active">
+      <div class="stats-grid" id="stats-grid">
+        <div class="card">
+          <div class="card-title">Total Requests (24h)</div>
+          <div class="stat-value" id="stat-requests">0</div>
+          <div class="stat-label">across all providers</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Total Cost (24h)</div>
+          <div class="stat-value" id="stat-cost">$0.00</div>
+          <div class="stat-label">estimated USD</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Avg Latency</div>
+          <div class="stat-value" id="stat-latency">0ms</div>
+          <div class="stat-label">across all models</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Arena Battles</div>
+          <div class="stat-value" id="stat-battles">0</div>
+          <div class="stat-label">completed</div>
+        </div>
+      </div>
+
+      <div class="card-title" style="margin-bottom: 12px;">Provider Health</div>
+      <div class="providers-grid" id="providers-grid">
+        <div class="card loading-overlay"><div class="spinner"></div> Loading providers...</div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-title">Cost by Provider (24h)</div>
+          <div id="cost-breakdown">
+            <div class="loading-overlay"><div class="spinner"></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Model Usage</div>
+          <div id="model-usage">
+            <div class="loading-overlay"><div class="spinner"></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ARENA TAB -->
+    <section id="tab-arena" class="section">
+      <div class="arena-container">
+        <div class="card">
+          <div class="card-title">New Battle</div>
+          <div class="arena-input">
+            <textarea id="arena-prompt" placeholder="Enter a prompt to race across models...&#10;&#10;Try something like:&#10;• Explain quantum computing in simple terms&#10;• Write a Python function to find the longest palindrome&#10;• What are the pros and cons of microservices?"></textarea>
+          </div>
+          <div class="arena-controls" style="margin-top: 16px;">
+            <div class="card-title" style="margin-bottom: 4px;">Select Models</div>
+            <div class="model-selector" id="model-selector">
+              <div class="loading-overlay"><div class="spinner"></div></div>
+            </div>
+            <div style="display: flex; gap: 12px; margin-top: 12px; align-items: center;">
+              <button class="btn btn-primary" id="btn-battle" onclick="startBattle()">Start Battle</button>
+              <span id="battle-status" class="stat-label"></span>
+            </div>
+          </div>
+        </div>
+
+        <div id="battle-results" style="display: none;">
+          <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <div class="card-title" style="margin-bottom: 0;">Battle Results — Vote for the best response</div>
+              <button class="btn btn-secondary" id="btn-reveal" onclick="revealBattle()" style="display: none;">Reveal Models</button>
+            </div>
+            <div class="battle-responses" id="battle-responses"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Recent Battles</div>
+          <div id="recent-battles">
+            <div class="empty-state">
+              <h3>No battles yet</h3>
+              <p>Start a battle above to see results here</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LEADERBOARD TAB -->
+    <section id="tab-leaderboard" class="section">
+      <div class="card">
+        <div class="card-title">ELO Leaderboard</div>
+        <div id="leaderboard-content">
+          <div class="empty-state">
+            <h3>No ratings yet</h3>
+            <p>Run arena battles and vote to build your personal leaderboard</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- REQUESTS TAB -->
+    <section id="tab-requests" class="section">
+      <div class="card">
+        <div class="card-title">Recent Requests</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Provider</th>
+                <th>Model</th>
+                <th>Strategy</th>
+                <th>Tokens</th>
+                <th>Latency</th>
+                <th>Cost</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="requests-table">
+              <tr><td colspan="8" class="empty-state">No requests yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>
