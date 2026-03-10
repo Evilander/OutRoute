@@ -1,0 +1,14 @@
+{
+  "name": "prism",
+  "version": "0.1.0",
+  "description": "Intelligent LLM arena + router. Race models, learn preferences, route smart.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/"
+  },
+  "keywords": ["llm", "ai", "router", "arena", "proxy"],
+  "license": "MIT"
+}
