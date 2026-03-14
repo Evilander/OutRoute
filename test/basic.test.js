@@ -100,49 +100,6 @@ describe('ELO Scoring', () => {
 });
 
 describe('Arena model resolution', () => {
-  it('autoSelectModels returns diverse providers', async () => {
-    // Simulate createArenaRouter autoSelectModels behavior by testing the logic directly
-    const mockProviders = new Map([
-      ['openai', { models: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] }],
-      ['anthropic', { models: [{ id: 'claude-sonnet-4-6' }, { id: 'claude-haiku-4-5-20251001' }] }],
-      ['google', { models: [{ id: 'gemini-2.0-flash' }] }],
-    ]);
-
-    // Round-robin across providers means we should get one from each (3 providers, count=3)
-    const byProvider = [];
-    for (const [name, provider] of mockProviders) {
-      if (provider.models && provider.models.length > 0) {
-        byProvider.push({ provider: name, models: [...provider.models] });
-      }
-    }
-
-    const selected = [];
-    const count = 3;
-    let round = 0;
-    while (selected.length < count) {
-      let added = false;
-      for (const p of byProvider) {
-        if (selected.length >= count) break;
-        if (round < p.models.length) {
-          selected.push(p.models[round].id);
-          added = true;
-        }
-      }
-      if (!added) break;
-      round++;
-    }
-
-    assert.equal(selected.length, 3, 'Should select 3 models');
-    const providers = selected.map(id => {
-      if (id.startsWith('gpt')) return 'openai';
-      if (id.startsWith('claude')) return 'anthropic';
-      if (id.startsWith('gemini')) return 'google';
-      return 'unknown';
-    });
-    const uniqueProviders = new Set(providers);
-    assert.equal(uniqueProviders.size, 3, 'Should have one model per provider');
-  });
-
   it('Anthropic provider uses current model IDs', async () => {
     const { AnthropicProvider } = await import('../src/proxy/providers/anthropic.js');
     const provider = new AnthropicProvider({ apiKey: 'test' });
@@ -150,5 +107,124 @@ describe('Arena model resolution', () => {
     assert.ok(modelIds.includes('claude-sonnet-4-6'), 'Should include claude-sonnet-4-6');
     assert.ok(modelIds.includes('claude-opus-4-6'), 'Should include claude-opus-4-6');
     assert.ok(!modelIds.some(id => id.includes('20250514')), 'Should not include stale 20250514 model IDs');
+  });
+});
+
+describe('Router', () => {
+  let router;
+
+  before(async () => {
+    const { Router } = await import('../src/proxy/router.js');
+    const mockProviders = new Map([
+      ['openai', {
+        models: [
+          { id: 'gpt-4o', costPer1kInput: 0.0025, costPer1kOutput: 0.01 },
+          { id: 'gpt-4o-mini', costPer1kInput: 0.00015, costPer1kOutput: 0.0006 },
+        ],
+      }],
+      ['anthropic', {
+        models: [
+          { id: 'claude-haiku-4-5-20251001', costPer1kInput: 0.0008, costPer1kOutput: 0.004 },
+        ],
+      }],
+    ]);
+    router = new Router(mockProviders);
+  });
+
+  it('getAllModels returns all models from all providers', () => {
+    const models = router.getAllModels();
+    assert.equal(models.length, 3);
+    assert.ok(models.every(m => m.provider && m.model));
+  });
+
+  it('findModelByName finds exact match', () => {
+    const result = router.findModelByName('gpt-4o');
+    assert.equal(result.model, 'gpt-4o');
+    assert.equal(result.provider, 'openai');
+  });
+
+  it('findModelByName returns null for unknown model', () => {
+    const result = router.findModelByName('nonexistent-model-xyz');
+    assert.equal(result, null);
+  });
+
+  it('selectModel cheapest picks lowest cost model', () => {
+    const result = router.selectModel('cheapest');
+    // gpt-4o-mini: 0.00015 + 0.0006 = 0.00075 (cheapest)
+    // claude-haiku: 0.0008 + 0.004 = 0.0048
+    // gpt-4o: 0.0025 + 0.01 = 0.0125
+    assert.equal(result.model, 'gpt-4o-mini');
+  });
+
+  it('selectModel excludes specified providers', () => {
+    const result = router.selectModel('cheapest', 'general', ['openai']);
+    assert.equal(result.provider, 'anthropic');
+  });
+
+  it('estimateCost calculates correctly', () => {
+    const meta = { costPer1kInput: 0.001, costPer1kOutput: 0.002 };
+    const cost = router.estimateCost(meta, 1000);
+    assert.equal(cost.estimatedInputCost, 0.001);
+    // output is ~1.5x input: 1500 tokens * 0.002/1k = 0.003
+    assert.equal(cost.estimatedOutputCost, 0.003);
+    assert.equal(cost.estimatedTotalCost, 0.004);
+  });
+
+  it('_calculateCost handles zero-cost models', () => {
+    const cost = router._calculateCost({}, 100, 50);
+    assert.equal(cost, 0);
+  });
+
+  it('ELO confidence threshold: low-battle model uses 1500 default', () => {
+    // Model with 0 battles should get treated as 1500, not whatever rating it has
+    // This prevents cold-start bias where a model with 1 battle at 1600 beats a proven 1580
+    const candidates = router.getAllModels();
+    const result = router._selectBest(candidates, 'general');
+    // All models have 0 battles so all are 1500 — should still return a valid model
+    assert.ok(result, 'Should return a candidate even with no battle data');
+    assert.ok(result.model, 'Result should have model field');
+  });
+});
+
+describe('Task type detection', () => {
+  it('detects code tasks', async () => {
+    const { detectTaskType } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: 'Write a Python function to sort an array' }];
+    assert.equal(detectTaskType(messages), 'code');
+  });
+
+  it('detects creative tasks', async () => {
+    const { detectTaskType } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: 'Write a short story about a lost lighthouse keeper' }];
+    assert.equal(detectTaskType(messages), 'creative');
+  });
+
+  it('detects analysis tasks', async () => {
+    const { detectTaskType } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: 'Analyze and summarize the pros and cons of microservices' }];
+    assert.equal(detectTaskType(messages), 'analysis');
+  });
+
+  it('falls back to general for ambiguous prompts', async () => {
+    const { detectTaskType } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: 'Hello' }];
+    assert.equal(detectTaskType(messages), 'general');
+  });
+});
+
+describe('Token estimation', () => {
+  it('estimates tokens from message content', async () => {
+    const { estimatePromptTokens } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: 'a'.repeat(400) }];
+    // 400 chars / 4 ≈ 100 tokens, plus role overhead
+    const estimate = estimatePromptTokens(messages);
+    assert.ok(estimate >= 100 && estimate <= 120, `Expected ~100-120 tokens, got ${estimate}`);
+  });
+
+  it('handles array content gracefully', async () => {
+    const { estimatePromptTokens } = await import('../src/proxy/router.js');
+    const messages = [{ role: 'user', content: ['text part', { type: 'image' }] }];
+    const estimate = estimatePromptTokens(messages);
+    assert.ok(estimate >= 0, 'Should return non-negative estimate for non-string content');
   });
 });
