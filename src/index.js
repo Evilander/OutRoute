@@ -39,7 +39,7 @@ async function main() {
       directives: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         connectSrc: ["'self'"],
       },

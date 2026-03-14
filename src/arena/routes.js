@@ -3,6 +3,10 @@ import { runBattle, voteBattle } from './arena.js';
 import { getLeaderboard } from './scorer.js';
 import { getBattle, getRecentBattles, getEvaluation } from '../db/store.js';
 import { initSession, getSession, streamCombatant, finalizeSession } from './streaming.js';
+import { createRateLimiter } from '../proxy/server.js';
+
+const VALID_TASK_TYPES = new Set(['general', 'code', 'creative', 'analysis', 'factual']);
+const arenaLimiter = createRateLimiter(60_000, 10);
 
 const DEFAULT_MODELS = [
   'gpt-4o',
@@ -67,9 +71,10 @@ export function setAutoJudge(judge) {
 export function createArenaRouter(providers) {
   const router = Router();
 
-  router.post('/battle', async (req, res) => {
+  router.post('/battle', arenaLimiter, async (req, res) => {
     try {
       const { prompt, models, taskType, maxTokens, temperature } = req.body;
+      const safeTaskType = VALID_TASK_TYPES.has(taskType) ? taskType : 'general';
 
       if (!prompt || (typeof prompt !== 'string' && !Array.isArray(prompt))) {
         return res.status(400).json({ error: 'prompt is required (string or message array)' });
@@ -84,7 +89,7 @@ export function createArenaRouter(providers) {
       }
 
       const result = await runBattle(prompt, selectedModels, providers, {
-        taskType: taskType || 'general',
+        taskType: safeTaskType,
         maxTokens: maxTokens || 1024,
         temperature: temperature ?? 0.7,
       });
@@ -111,7 +116,7 @@ export function createArenaRouter(providers) {
       });
     } catch (err) {
       console.error('[Arena] Battle error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Battle failed' });
     }
   });
 
@@ -143,8 +148,9 @@ export function createArenaRouter(providers) {
       });
     } catch (err) {
       console.error('[Arena] Vote error:', err.message);
-      const status = err.message.includes('already been voted') ? 409 : 500;
-      res.status(status).json({ error: err.message });
+      const status = err.message?.includes('already been voted') ? 409 : 500;
+      const safeMsg = status === 409 ? 'This battle has already been voted on' : 'Vote failed';
+      res.status(status).json({ error: safeMsg });
     }
   });
 
@@ -186,7 +192,7 @@ export function createArenaRouter(providers) {
       });
     } catch (err) {
       console.error('[Arena] Reveal error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -197,7 +203,7 @@ export function createArenaRouter(providers) {
       res.json({ leaderboard });
     } catch (err) {
       console.error('[Arena] Leaderboard error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -227,13 +233,14 @@ export function createArenaRouter(providers) {
       res.json({ battles: sanitized });
     } catch (err) {
       console.error('[Arena] Battles list error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
-  router.post('/session', (req, res) => {
+  router.post('/session', arenaLimiter, (req, res) => {
     try {
       const { prompt, models, taskType, maxTokens, temperature } = req.body;
+      const safeTaskType = VALID_TASK_TYPES.has(taskType) ? taskType : 'general';
 
       if (!prompt) {
         return res.status(400).json({ error: 'prompt is required' });
@@ -248,7 +255,7 @@ export function createArenaRouter(providers) {
       }
 
       const session = initSession(prompt, selectedModels, providers, {
-        taskType: taskType || 'general',
+        taskType: safeTaskType,
         maxTokens: maxTokens || 1024,
         temperature: temperature ?? 0.7,
       });
@@ -256,7 +263,7 @@ export function createArenaRouter(providers) {
       res.json(session);
     } catch (err) {
       console.error('[Arena] Session init error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Session init failed' });
     }
   });
 
@@ -316,7 +323,7 @@ export function createArenaRouter(providers) {
       });
     } catch (err) {
       console.error('[Arena] Session finalize error:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Session finalize failed' });
     }
   });
 

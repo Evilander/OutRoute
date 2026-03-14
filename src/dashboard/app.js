@@ -96,7 +96,9 @@ function renderStats(stats) {
   // Cost breakdown
   const costEl = document.getElementById('cost-breakdown');
   if (stats.length === 0) {
-    clearAndAppend(costEl, el('div', { className: 'empty-state' }, [el('p', {}, ['No data yet'])]));
+    const empty = el('div', { className: 'empty-state' }, [el('p', {}, ['No data yet'])]);
+    clearAndAppend(costEl, empty);
+    clearAndAppend(document.getElementById('model-usage'), el('div', { className: 'empty-state' }, [el('p', {}, ['No data yet'])]));
     return;
   }
 
@@ -248,7 +250,7 @@ function renderBattleResults(result) {
   const container = document.getElementById('battle-results');
   const responses = document.getElementById('battle-responses');
   container.style.display = 'block';
-  document.getElementById('btn-reveal').style.display = 'inline-block';
+  document.getElementById('btn-reveal').style.display = 'none';
 
   // Keyboard voting: press 1/2/3/... to vote for that position
   const keyHandler = (e) => {
@@ -305,6 +307,7 @@ async function voteBattle(battleId, position) {
 
   if (!result) return;
 
+  document.getElementById('btn-reveal').style.display = 'inline-block';
   document.querySelectorAll('.btn-vote').forEach(btn => btn.disabled = true);
   document.querySelectorAll('.battle-response').forEach(el => {
     const label = el.querySelector('.response-label');

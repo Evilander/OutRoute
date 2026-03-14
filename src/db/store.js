@@ -32,7 +32,11 @@ export function logRequest(data) {
   return getDb().prepare(`
     INSERT INTO requests (provider, model, strategy, prompt_preview, input_tokens, output_tokens, total_tokens, latency_ms, cost_usd, status, error_message, task_type, routing_reason)
     VALUES (@provider, @model, @strategy, @promptPreview, @inputTokens, @outputTokens, @totalTokens, @latencyMs, @costUsd, @status, @errorMessage, @taskType, @routingReason)
-  `).run({ routingReason: null, ...data });
+  `).run({
+    routingReason: null,
+    ...data,
+    promptPreview: (data.promptPreview || '').slice(0, 500),
+  });
 }
 
 export function getRequestStats(hours = 24) {

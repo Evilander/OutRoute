@@ -6,8 +6,7 @@ import {
   getProviderHealth,
 } from '../db/store.js';
 
-// Simple in-memory rate limiter per IP
-function createRateLimiter(windowMs = 60_000, maxRequests = 60) {
+export function createRateLimiter(windowMs = 60_000, maxRequests = 60) {
   const hits = new Map();
   // Cleanup old entries every minute
   setInterval(() => {
@@ -265,7 +264,7 @@ export default function createProxyRouter(providers, router) {
       });
     } catch (err) {
       console.error('[server] /api/stats error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
@@ -276,7 +275,7 @@ export default function createProxyRouter(providers, router) {
       res.json({ hours, timeline });
     } catch (err) {
       console.error('[server] /api/stats/timeline error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
@@ -287,7 +286,7 @@ export default function createProxyRouter(providers, router) {
       res.json({ requests });
     } catch (err) {
       console.error('[server] /api/requests error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
@@ -324,7 +323,7 @@ export default function createProxyRouter(providers, router) {
       res.json({ providers: providerList });
     } catch (err) {
       console.error('[server] /api/providers error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
@@ -346,7 +345,7 @@ export default function createProxyRouter(providers, router) {
       });
     } catch (err) {
       console.error('[server] /api/models error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
@@ -365,7 +364,7 @@ export default function createProxyRouter(providers, router) {
       });
     } catch (err) {
       console.error('[server] /v1/models error:', err.message);
-      res.status(500).json({ error: { message: err.message } });
+      res.status(500).json({ error: { message: 'Internal server error' } });
     }
   });
 
