@@ -1,48 +1,72 @@
 import { Router } from 'express';
 import { runBattle, voteBattle } from './arena.js';
 import { getLeaderboard } from './scorer.js';
-import { getBattle, getRecentBattles } from '../db/store.js';
+import { getBattle, getRecentBattles, getEvaluation } from '../db/store.js';
+import { initSession, getSession, streamCombatant, finalizeSession } from './streaming.js';
 
 const DEFAULT_MODELS = [
   'gpt-4o',
-  'claude-sonnet-4-20250514',
-  'gemini-2.0-flash',
+  'claude-sonnet-4-6',
+  'gemini-2.5-flash',
   'llama-3.3-70b-versatile',
   'claude-haiku-4-5-20251001',
 ];
 
 function autoSelectModels(providers, count = 3) {
-  const available = [];
+  // Build a pool of models grouped by provider for diversity
+  const byProvider = [];
   for (const [name, provider] of providers) {
-    if (provider.models) {
-      for (const model of provider.models) {
-        available.push(model);
+    if (provider.models && provider.models.length > 0) {
+      // Pick one model per provider (cheapest/most capable heuristic: first in list)
+      byProvider.push({ provider: name, models: [...provider.models] });
+    }
+  }
+
+  if (byProvider.length === 0) {
+    return DEFAULT_MODELS.slice(0, count);
+  }
+
+  // Round-robin across providers to maximize diversity, shuffle within each
+  for (const p of byProvider) {
+    for (let i = p.models.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [p.models[i], p.models[j]] = [p.models[j], p.models[i]];
+    }
+  }
+
+  // Shuffle provider order for variety
+  for (let i = byProvider.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [byProvider[i], byProvider[j]] = [byProvider[j], byProvider[i]];
+  }
+
+  const selected = [];
+  let round = 0;
+  while (selected.length < count) {
+    let added = false;
+    for (const p of byProvider) {
+      if (selected.length >= count) break;
+      if (round < p.models.length) {
+        selected.push(p.models[round].id || p.models[round]);
+        added = true;
       }
     }
+    if (!added) break;
+    round++;
   }
-  if (available.length > 0) {
-    // Shuffle and pick `count` models
-    // Fisher-Yates shuffle for uniform distribution
-    const shuffled = [...available];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    return shuffled.slice(0, Math.min(count, shuffled.length));
-  }
-  // Fallback: try defaults that might have providers
-  const fallback = [];
-  for (const model of DEFAULT_MODELS) {
-    if (fallback.length >= count) break;
-    fallback.push(model);
-  }
-  return fallback.slice(0, count);
+
+  return selected.slice(0, count);
+}
+
+let autoJudge = null;
+
+export function setAutoJudge(judge) {
+  autoJudge = judge;
 }
 
 export function createArenaRouter(providers) {
   const router = Router();
 
-  // Start a new battle
   router.post('/battle', async (req, res) => {
     try {
       const { prompt, models, taskType, maxTokens, temperature } = req.body;
@@ -75,9 +99,15 @@ export function createArenaRouter(providers) {
         error: e.error || null,
       }));
 
+      // Auto-judge in background if available and autoJudge is enabled
+      if (autoJudge && autoJudge.available && req.body.autoJudge !== false) {
+        autoJudge.enqueue(result.battleId);
+      }
+
       res.json({
         battleId: result.battleId,
         entries: blindEntries,
+        autoJudge: autoJudge?.available ? 'queued' : 'unavailable',
       });
     } catch (err) {
       console.error('[Arena] Battle error:', err.message);
@@ -85,7 +115,6 @@ export function createArenaRouter(providers) {
     }
   });
 
-  // Vote on a battle winner
   router.post('/vote', async (req, res) => {
     try {
       const { battleId, winnerPosition } = req.body;
@@ -119,7 +148,6 @@ export function createArenaRouter(providers) {
     }
   });
 
-  // Reveal which model produced which response
   router.get('/reveal/:battleId', (req, res) => {
     try {
       const battleId = Number(req.params.battleId);
@@ -142,12 +170,19 @@ export function createArenaRouter(providers) {
         isWinner: !!e.is_winner,
       }));
 
+      const evaluation = getEvaluation(battleId);
+
       res.json({
         battleId,
         prompt: battle.prompt,
         taskType: battle.task_type,
         status: battle.status,
         entries,
+        ...(evaluation ? {
+          judgeReasoning: evaluation.reasoning,
+          judgeModel: evaluation.judge_model,
+          inferredDomain: evaluation.inferred_domain,
+        } : {}),
       });
     } catch (err) {
       console.error('[Arena] Reveal error:', err.message);
@@ -155,7 +190,6 @@ export function createArenaRouter(providers) {
     }
   });
 
-  // Get ELO leaderboard
   router.get('/leaderboard', (req, res) => {
     try {
       const taskType = req.query.taskType || null;
@@ -167,7 +201,6 @@ export function createArenaRouter(providers) {
     }
   });
 
-  // Get recent battles
   router.get('/battles', (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 20, 100);
@@ -194,6 +227,95 @@ export function createArenaRouter(providers) {
       res.json({ battles: sanitized });
     } catch (err) {
       console.error('[Arena] Battles list error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/session', (req, res) => {
+    try {
+      const { prompt, models, taskType, maxTokens, temperature } = req.body;
+
+      if (!prompt) {
+        return res.status(400).json({ error: 'prompt is required' });
+      }
+
+      const selectedModels = models && models.length >= 2
+        ? models.slice(0, 8).filter(m => typeof m === 'string' && m.length <= 100)
+        : autoSelectModels(providers);
+
+      if (selectedModels.length < 2) {
+        return res.status(400).json({ error: 'At least 2 models are required' });
+      }
+
+      const session = initSession(prompt, selectedModels, providers, {
+        taskType: taskType || 'general',
+        maxTokens: maxTokens || 1024,
+        temperature: temperature ?? 0.7,
+      });
+
+      res.json(session);
+    } catch (err) {
+      console.error('[Arena] Session init error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Stream a single combatant's response (SSE)
+  router.get('/stream/:sessionId/:combatantId', async (req, res) => {
+    const { sessionId, combatantId } = req.params;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    let aborted = false;
+    req.on('close', () => { aborted = true; });
+
+    try {
+      for await (const chunk of streamCombatant(sessionId, combatantId)) {
+        if (aborted) break;
+
+        if (chunk.type === 'delta') {
+          res.write(`data: ${JSON.stringify({ type: 'delta', content: chunk.content })}\n\n`);
+        } else if (chunk.type === 'done') {
+          res.write(`data: ${JSON.stringify({ type: 'done', latencyMs: chunk.latencyMs })}\n\n`);
+        } else if (chunk.type === 'error') {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: chunk.message })}\n\n`);
+        }
+      }
+    } catch (err) {
+      if (!aborted) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      }
+    }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
+  });
+
+  // Finalize a streaming session (stores entries in DB, returns battleId for voting)
+  router.post('/session/:sessionId/finalize', (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const session = getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      const battleId = finalizeSession(sessionId);
+
+      // Auto-judge in background if available
+      if (autoJudge && autoJudge.available) {
+        autoJudge.enqueue(battleId);
+      }
+
+      res.json({
+        battleId,
+        autoJudge: autoJudge?.available ? 'queued' : 'unavailable',
+      });
+    } catch (err) {
+      console.error('[Arena] Session finalize error:', err.message);
       res.status(500).json({ error: err.message });
     }
   });

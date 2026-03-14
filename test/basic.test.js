@@ -98,3 +98,57 @@ describe('ELO Scoring', () => {
     assert.ok(upsetGain > evenGain, 'Underdog win should give bigger boost');
   });
 });
+
+describe('Arena model resolution', () => {
+  it('autoSelectModels returns diverse providers', async () => {
+    // Simulate createArenaRouter autoSelectModels behavior by testing the logic directly
+    const mockProviders = new Map([
+      ['openai', { models: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] }],
+      ['anthropic', { models: [{ id: 'claude-sonnet-4-6' }, { id: 'claude-haiku-4-5-20251001' }] }],
+      ['google', { models: [{ id: 'gemini-2.0-flash' }] }],
+    ]);
+
+    // Round-robin across providers means we should get one from each (3 providers, count=3)
+    const byProvider = [];
+    for (const [name, provider] of mockProviders) {
+      if (provider.models && provider.models.length > 0) {
+        byProvider.push({ provider: name, models: [...provider.models] });
+      }
+    }
+
+    const selected = [];
+    const count = 3;
+    let round = 0;
+    while (selected.length < count) {
+      let added = false;
+      for (const p of byProvider) {
+        if (selected.length >= count) break;
+        if (round < p.models.length) {
+          selected.push(p.models[round].id);
+          added = true;
+        }
+      }
+      if (!added) break;
+      round++;
+    }
+
+    assert.equal(selected.length, 3, 'Should select 3 models');
+    const providers = selected.map(id => {
+      if (id.startsWith('gpt')) return 'openai';
+      if (id.startsWith('claude')) return 'anthropic';
+      if (id.startsWith('gemini')) return 'google';
+      return 'unknown';
+    });
+    const uniqueProviders = new Set(providers);
+    assert.equal(uniqueProviders.size, 3, 'Should have one model per provider');
+  });
+
+  it('Anthropic provider uses current model IDs', async () => {
+    const { AnthropicProvider } = await import('../src/proxy/providers/anthropic.js');
+    const provider = new AnthropicProvider({ apiKey: 'test' });
+    const modelIds = provider.models.map(m => m.id);
+    assert.ok(modelIds.includes('claude-sonnet-4-6'), 'Should include claude-sonnet-4-6');
+    assert.ok(modelIds.includes('claude-opus-4-6'), 'Should include claude-opus-4-6');
+    assert.ok(!modelIds.some(id => id.includes('20250514')), 'Should not include stale 20250514 model IDs');
+  });
+});

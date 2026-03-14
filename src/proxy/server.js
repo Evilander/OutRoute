@@ -1,5 +1,4 @@
 import { Router as ExpressRouter } from 'express';
-import { randomUUID } from 'crypto';
 import {
   getRequestStats,
   getCostTimeline,
@@ -39,10 +38,7 @@ function createRateLimiter(windowMs = 60_000, maxRequests = 60) {
 export default function createProxyRouter(providers, router) {
   const app = ExpressRouter();
 
-  // Rate limit the proxy endpoint (60 requests/min per IP)
   app.use('/v1/chat/completions', createRateLimiter(60_000, 60));
-
-  // ---------- OpenAI-compatible proxy ----------
 
   app.post('/v1/chat/completions', async (req, res) => {
     try {
@@ -56,6 +52,25 @@ export default function createProxyRouter(providers, router) {
             code: 'missing_messages',
           },
         });
+      }
+
+      // Validate message shape
+      for (const msg of messages) {
+        if (!msg || typeof msg !== 'object') {
+          return res.status(400).json({
+            error: { message: 'Each message must be an object', type: 'invalid_request_error', code: 'invalid_message' },
+          });
+        }
+        if (!msg.role || typeof msg.role !== 'string') {
+          return res.status(400).json({
+            error: { message: 'Each message must have a string "role" field', type: 'invalid_request_error', code: 'invalid_message' },
+          });
+        }
+        if (msg.content !== undefined && typeof msg.content !== 'string' && !Array.isArray(msg.content)) {
+          return res.status(400).json({
+            error: { message: 'Message "content" must be a string or array', type: 'invalid_request_error', code: 'invalid_message' },
+          });
+        }
       }
 
       const VALID_STRATEGIES = new Set(['cheapest', 'fastest', 'best', 'round-robin']);
@@ -79,7 +94,6 @@ export default function createProxyRouter(providers, router) {
         maxTokens: safeMaxTokens,
       };
 
-      // Non-streaming
       if (!stream) {
         const result = await router.route(messages, options);
 
@@ -106,7 +120,6 @@ export default function createProxyRouter(providers, router) {
       if (result.stream) {
         const streamId = result.id;
 
-        // First chunk with role
         const firstChunk = {
           id: streamId,
           object: 'chat.completion.chunk',
@@ -142,7 +155,6 @@ export default function createProxyRouter(providers, router) {
           console.error('[server] stream error:', streamErr.message);
         }
 
-        // Final chunk
         const finalChunk = {
           id: streamId,
           object: 'chat.completion.chunk',
@@ -186,7 +198,6 @@ export default function createProxyRouter(providers, router) {
         })}\n\n`);
       }
 
-      // Stop chunk
       res.write(`data: ${JSON.stringify({
         id: streamId,
         object: 'chat.completion.chunk',
@@ -213,17 +224,23 @@ export default function createProxyRouter(providers, router) {
         : err.code === 'ALL_PROVIDERS_FAILED' ? 502
         : 500;
 
+      // Sanitize error messages — don't leak raw provider details
+      const safeMessages = {
+        MODEL_NOT_FOUND: err.message,
+        NO_MODELS_AVAILABLE: 'No models are currently available to handle this request',
+        ALL_PROVIDERS_FAILED: 'All providers failed to process this request',
+      };
+      const safeMessage = safeMessages[err.code] || 'An internal error occurred while processing your request';
+
       return res.status(status).json({
         error: {
-          message: err.message,
+          message: safeMessage,
           type: 'server_error',
           code: err.code || 'internal_error',
         },
       });
     }
   });
-
-  // ---------- Stats endpoints ----------
 
   app.get('/api/stats', (req, res) => {
     try {

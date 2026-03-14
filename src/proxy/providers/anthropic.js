@@ -2,15 +2,15 @@ import { BaseProvider, ProviderError } from './base.js';
 
 const MODELS = [
   {
-    id: 'claude-opus-4-20250514',
-    name: 'Claude Opus 4',
+    id: 'claude-opus-4-6',
+    name: 'Claude Opus 4.6',
     contextWindow: 200_000,
     costPer1kInput: 0.015,
     costPer1kOutput: 0.075,
   },
   {
-    id: 'claude-sonnet-4-20250514',
-    name: 'Claude Sonnet 4',
+    id: 'claude-sonnet-4-6',
+    name: 'Claude Sonnet 4.6',
     contextWindow: 200_000,
     costPer1kInput: 0.003,
     costPer1kOutput: 0.015,
@@ -89,7 +89,7 @@ export class AnthropicProvider extends BaseProvider {
     const { system, messages: convertedMessages } = this.#convertMessages(messages);
 
     const body = {
-      model: options.model || 'claude-sonnet-4-20250514',
+      model: options.model || 'claude-sonnet-4-6',
       max_tokens: options.maxTokens || 4096,
       messages: convertedMessages,
     };
@@ -220,7 +220,7 @@ export class AnthropicProvider extends BaseProvider {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullContent = '';
-    let finalModel = options.model || 'claude-sonnet-4-20250514';
+    let finalModel = options.model || 'claude-sonnet-4-6';
     let inputTokens = 0;
     let outputTokens = 0;
 

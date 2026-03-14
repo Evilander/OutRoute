@@ -208,7 +208,7 @@ function toggleModel(modelId) {
   renderModelSelector();
 }
 
-window.startBattle = async function() {
+async function startBattle() {
   const prompt = document.getElementById('arena-prompt').value.trim();
   if (!prompt) return;
 
@@ -250,6 +250,17 @@ function renderBattleResults(result) {
   container.style.display = 'block';
   document.getElementById('btn-reveal').style.display = 'inline-block';
 
+  // Keyboard voting: press 1/2/3/... to vote for that position
+  const keyHandler = (e) => {
+    const n = parseInt(e.key);
+    if (n >= 1 && n <= result.entries.length) {
+      document.removeEventListener('keydown', keyHandler);
+      voteBattle(result.battleId, n);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+  window._activeKeyHandler = keyHandler;
+
   const cards = result.entries.map((entry, i) => {
     const card = el('div', {
       className: 'battle-response animate-in',
@@ -280,6 +291,12 @@ function renderBattleResults(result) {
 }
 
 async function voteBattle(battleId, position) {
+  // Remove keyboard handler once vote is cast
+  if (window._activeKeyHandler) {
+    document.removeEventListener('keydown', window._activeKeyHandler);
+    window._activeKeyHandler = null;
+  }
+
   const result = await fetchJSON('/arena/vote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -288,7 +305,6 @@ async function voteBattle(battleId, position) {
 
   if (!result) return;
 
-  // Highlight winner
   document.querySelectorAll('.btn-vote').forEach(btn => btn.disabled = true);
   document.querySelectorAll('.battle-response').forEach(el => {
     const label = el.querySelector('.response-label');
@@ -306,7 +322,7 @@ async function voteBattle(battleId, position) {
   refreshDashboard();
 }
 
-window.revealBattle = async function() {
+async function revealBattle() {
   if (!currentBattleId) return;
   const result = await fetchJSON(`/arena/reveal/${currentBattleId}`);
   if (!result || !result.entries) return;
@@ -323,6 +339,47 @@ window.revealBattle = async function() {
   });
 
   document.getElementById('btn-reveal').style.display = 'none';
+  document.getElementById('btn-copy-result').style.display = 'inline-block';
+  document.getElementById('keyboard-hint').style.display = 'none';
+
+  if (result.judgeReasoning) {
+    const existing = document.getElementById('judge-panel');
+    if (existing) existing.remove();
+
+    const panel = el('div', { id: 'judge-panel', className: 'card', style: { marginTop: '16px' } }, [
+      el('div', { className: 'card-title', style: { marginBottom: '8px' } }, [
+        'Auto-Judge Analysis',
+        result.judgeModel
+          ? el('span', { className: 'stat-label', style: { marginLeft: '8px', fontWeight: 'normal' } }, [`via ${result.judgeModel}`])
+          : null,
+        result.inferredDomain
+          ? el('span', { className: 'model-badge', style: { marginLeft: '8px' } }, [result.inferredDomain])
+          : null,
+      ]),
+      el('div', { style: { color: 'var(--text-secondary)', lineHeight: '1.6', whiteSpace: 'pre-wrap', fontSize: '14px' } }, [result.judgeReasoning]),
+    ]);
+
+    document.getElementById('battle-results').appendChild(panel);
+  }
+};
+
+function copyBattleResult() {
+  const responseCards = document.querySelectorAll('#battle-responses .battle-response');
+  const lines = [`## Battle #${currentBattleId}\n`];
+  responseCards.forEach((card, i) => {
+    const label = card.querySelector('.response-label');
+    const body = card.querySelector('.response-body');
+    const meta = card.querySelector('.response-meta');
+    lines.push(`### ${label.textContent || `Response ${i + 1}`} ${meta ? `(${meta.textContent})` : ''}`);
+    lines.push(body ? body.textContent : '');
+    lines.push('');
+  });
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
+    const btn = document.getElementById('btn-copy-result');
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  });
 };
 
 function renderRecentBattles(battles) {
@@ -419,7 +476,7 @@ function renderRequests(requests) {
       el('td', {}, [time]),
       el('td', {}, [modelBadge(r.provider, r.provider)]),
       el('td', { style: { fontFamily: "'JetBrains Mono', monospace", fontSize: '12px' } }, [truncModel(r.model)]),
-      el('td', {}, [r.strategy || '']),
+      el('td', { title: r.routing_reason || '', style: { cursor: r.routing_reason ? 'help' : 'default' } }, [r.strategy || '']),
       el('td', {}, [(r.total_tokens || 0).toLocaleString()]),
       el('td', {}, [`${r.latency_ms || 0}ms`]),
       el('td', { className: costClass(r.cost_usd) }, [`$${(r.cost_usd || 0).toFixed(4)}`]),
@@ -440,9 +497,14 @@ function renderRequests(requests) {
 function truncModel(model) {
   if (!model) return '\u2014';
   return model
+    .replace('claude-opus-4-6', 'claude-opus-4.6')
+    .replace('claude-sonnet-4-6', 'claude-sonnet-4.6')
     .replace('claude-opus-4-20250901', 'claude-opus-4')
     .replace('claude-sonnet-4-20250514', 'claude-sonnet-4')
+    .replace('claude-haiku-4-5-20251001', 'claude-haiku-4.5')
     .replace('claude-3-5-haiku-20241022', 'claude-3.5-haiku')
+    .replace('gemini-2.5-flash', 'gemini-2.5-flash')
+    .replace('gemini-2.5-pro', 'gemini-2.5-pro')
     .replace('gemini-2.0-flash', 'gemini-2-flash')
     .replace('llama-3.3-70b-versatile', 'llama-3.3-70b')
     .replace('llama-3.1-8b-instant', 'llama-3.1-8b')
@@ -465,6 +527,10 @@ function costClass(cost) {
 }
 
 // --- Init ---
+
+document.getElementById('btn-battle').addEventListener('click', startBattle);
+document.getElementById('btn-reveal').addEventListener('click', revealBattle);
+document.getElementById('btn-copy-result').addEventListener('click', copyBattleResult);
 
 refreshDashboard();
 setInterval(refreshDashboard, 15000);

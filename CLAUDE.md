@@ -10,16 +10,20 @@ An intelligent LLM arena + router. Race frontier models against each other, buil
 - Nobody should be locked to one model. But nobody has built the UX for navigating multi-model intelligently.
 
 ## Core Features
-1. **Arena Mode**: Race 2-4 models on the same prompt. See responses side-by-side. Vote on winners. Build a personal ELO leaderboard by task type.
-2. **Smart Router**: OpenAI-compatible API proxy that routes based on your arena data + cost/latency/capability preferences.
-3. **Dashboard**: Real-time analytics — cost per model, win rates, latency, provider health.
-4. **Failover**: If a provider is down, automatically route to the next best option.
+1. **Arena Mode**: Race 2-8 models blind. Vote on winners. Auto-judge handles evaluation automatically.
+2. **Streaming Arena**: SSE-based real-time streaming with ephemeral session proxying (opaque UUIDs for blind eval).
+3. **Auto-Judge**: LLM-as-judge with domain-conditional rubric + double-blind swap for bias mitigation.
+4. **Smart Router**: OpenAI-compatible API proxy with 5 routing strategies (best/cheapest/fastest/round-robin/specific).
+5. **100+ Models**: OpenAI, Anthropic, Google, Groq + OpenRouter (dynamic model sync every 12h).
+6. **Dashboard**: Real-time analytics — cost per model, win rates, latency, provider health.
 
 ## Architecture
-- Node.js ES modules, Express for HTTP
-- better-sqlite3 for local analytics (zero setup)
+- Node.js ES modules, Express 5 + Helmet for HTTP
+- better-sqlite3 WAL mode for local analytics
+- Dynamic model registry (SQLite table synced from OpenRouter API)
 - Vanilla HTML/CSS/JS dashboard (no framework overhead)
-- Provider adapters: OpenAI, Anthropic, Google Gemini, Groq
+- Provider adapters: OpenAI, Anthropic, Google Gemini, Groq, OpenRouter
+- Background services: model sync, auto-judge, health monitor
 
 ## Conventions
 - ES modules only (`import`/`export`)
@@ -33,19 +37,21 @@ An intelligent LLM arena + router. Race frontier models against each other, buil
 npm install
 cp .env.example .env  # Add API keys
 node src/index.js      # Starts on port 3080
-# Dashboard: http://localhost:3080
-# API: http://localhost:3080/v1/chat/completions
-# Arena: http://localhost:3080/arena
+# Or: docker compose up -d
 ```
 
 ## File Map
-- `src/index.js` — Entry point, starts Express
-- `src/proxy/server.js` — OpenAI-compatible API proxy
-- `src/proxy/router.js` — Intelligent routing logic
-- `src/proxy/providers/` — Provider adapters (openai, anthropic, google, groq)
+- `src/index.js` — Entry point, Express + middleware + lifecycle
+- `src/proxy/server.js` — OpenAI-compatible API proxy + stats endpoints
+- `src/proxy/router.js` — Intelligent routing logic (strategy, failover, cost)
+- `src/proxy/providers/` — Provider adapters (openai, anthropic, google, groq, openrouter)
 - `src/arena/arena.js` — Arena mode: race models, collect votes
+- `src/arena/streaming.js` — Streaming arena: ephemeral sessions, SSE per-combatant
 - `src/arena/scorer.js` — ELO scoring + preference learning
+- `src/arena/routes.js` — Arena API endpoints (battle, vote, reveal, streaming)
+- `src/services/auto-judge.js` — LLM-as-judge with double-blind evaluation
+- `src/services/model-sync.js` — OpenRouter model sync (12h background job)
 - `src/db/store.js` — SQLite wrapper for all data
-- `src/db/schema.sql` — Database schema
+- `src/db/schema.sql` — Database schema (requests, battles, ELO, model_registry, evaluations)
 - `src/health/monitor.js` — Provider health monitoring
 - `src/dashboard/` — Web UI (HTML/CSS/JS)

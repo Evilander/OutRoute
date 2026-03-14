@@ -187,13 +187,14 @@ export class Router {
 
     for (const c of candidates) {
       const elo = getEloRating(c.model, taskType);
-      if (elo.rating > bestRating) {
-        bestRating = elo.rating;
+      // Treat models with fewer than 20 battles as unproven (use default 1500)
+      const effectiveRating = elo.battles >= 20 ? elo.rating : 1500;
+      if (effectiveRating > bestRating) {
+        bestRating = effectiveRating;
         bestCandidate = c;
       }
     }
 
-    // All at default 1500 — pick the first one
     if (!bestCandidate) return { provider: candidates[0].provider, model: candidates[0].model, meta: candidates[0] };
 
     return { provider: bestCandidate.provider, model: bestCandidate.model, meta: bestCandidate };
@@ -234,19 +235,21 @@ export class Router {
 
     let effectiveStrategy = strategy;
     let selection;
+    let routingReason;
 
-    // Specific model requested
     if (requestedModel) {
       selection = this.findModelByName(requestedModel);
       if (!selection) {
         throw new PrismRoutingError(`Model "${requestedModel}" not found in any configured provider`, 'MODEL_NOT_FOUND');
       }
       effectiveStrategy = 'specific';
+      routingReason = `Specific model requested: ${selection.model}`;
     } else {
       selection = this.selectModel(strategy, taskType);
       if (!selection) {
         throw new PrismRoutingError('No available models to route to', 'NO_MODELS_AVAILABLE');
       }
+      routingReason = this._buildRoutingReason(effectiveStrategy, selection, taskType);
     }
 
     const costEstimate = this.estimateCost(selection.meta || {}, inputTokenEstimate);
@@ -308,6 +311,9 @@ export class Router {
             status: 'ok',
             errorMessage: null,
             taskType,
+            routingReason: attempt !== selection
+              ? `Failover from ${selection.model}`
+              : routingReason,
           });
         } catch (logErr) {
           console.error('[router] failed to log request:', logErr.message);
@@ -338,6 +344,9 @@ export class Router {
           prism: {
             provider: attempt.provider,
             strategy: effectiveStrategy,
+            routing_reason: attempt !== selection
+              ? `Failover from ${selection.model}: ${lastError?.message?.slice(0, 80) || 'provider error'}`
+              : routingReason,
             latency_ms: latencyMs,
             cost_usd: actualCost,
             task_type: taskType,
@@ -371,6 +380,7 @@ export class Router {
             status: 'error',
             errorMessage: err.message?.slice(0, 500),
             taskType,
+            routingReason: null,
           });
         } catch (logErr) {
           console.error('[router] failed to log error:', logErr.message);
@@ -391,6 +401,26 @@ export class Router {
       `All providers failed. Last error: ${lastError?.message || 'unknown'}`,
       'ALL_PROVIDERS_FAILED',
     );
+  }
+
+  _buildRoutingReason(strategy, selection, taskType) {
+    switch (strategy) {
+      case 'cheapest': {
+        const cost = ((selection.meta?.costPer1kInput || 0) + (selection.meta?.costPer1kOutput || 0));
+        return `Cheapest available · $${cost.toFixed(4)}/1k tokens`;
+      }
+      case 'fastest': {
+        return `Lowest observed latency · ${selection.provider}/${selection.model}`;
+      }
+      case 'best': {
+        const elo = getEloRating(selection.model, taskType);
+        return `Best ELO for ${taskType} tasks · ${Math.round(elo.rating)} rating (${elo.battles} battles)`;
+      }
+      case 'round-robin':
+        return `Round-robin selection · ${selection.provider}/${selection.model}`;
+      default:
+        return `Strategy: ${strategy} · ${selection.model}`;
+    }
   }
 
   _calculateCost(meta, inputTokens, outputTokens) {

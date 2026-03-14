@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
+import helmet from 'helmet';
+import { timingSafeEqual } from 'crypto';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from './db/store.js';
@@ -9,11 +11,9 @@ const PORT = process.env.PORT || 3080;
 const HOST = process.env.HOST || 'localhost';
 
 async function main() {
-  // Initialize database
   getDb();
   console.log('[prism] Database initialized');
 
-  // Load providers
   const { createProviders } = await import('./proxy/providers/index.js');
   const providers = createProviders();
   console.log(`[prism] Loaded ${providers.size} providers: ${[...providers.keys()].join(', ')}`);
@@ -22,17 +22,30 @@ async function main() {
     console.warn('[prism] No providers configured! Add API keys to .env');
   }
 
-  // Initialize router
   const { Router } = await import('./proxy/router.js');
   const router = new Router(providers);
 
-  // Initialize health monitor
   const { HealthMonitor } = await import('./health/monitor.js');
   const monitor = new HealthMonitor(providers);
   monitor.start();
 
-  // Create Express app
+  const { ModelSyncService } = await import('./services/model-sync.js');
+  const modelSync = new ModelSyncService();
+  await modelSync.start();
+
   const app = express();
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        connectSrc: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }));
   app.use(express.json({ limit: '10mb' }));
 
   // CORS
@@ -53,7 +66,11 @@ async function main() {
         return next();
       }
       const auth = req.headers['authorization'] || '';
-      if (!auth.startsWith('Bearer ') || auth.slice(7) !== secret) {
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      const tokenBuf = Buffer.from(token.padEnd(secret.length));
+      const secretBuf = Buffer.from(secret);
+      const valid = token.length === secret.length && timingSafeEqual(tokenBuf, secretBuf);
+      if (!valid) {
         return res.status(401).json({
           error: { message: 'Unauthorized — set Authorization: Bearer <PRISM_SECRET>', code: 'unauthorized' },
         });
@@ -63,21 +80,20 @@ async function main() {
     console.log('[prism] Bearer token auth enabled (PRISM_SECRET set)');
   }
 
-  // Dashboard static files
   app.use('/dashboard', express.static(join(__dirname, 'dashboard')));
-
-  // Root -> dashboard
   app.get('/', (req, res) => res.redirect('/dashboard/index.html'));
 
-  // Mount proxy routes
   const { default: createProxyRouter } = await import('./proxy/server.js');
   app.use(createProxyRouter(providers, router));
 
-  // Mount arena routes
-  const { createArenaRouter } = await import('./arena/routes.js');
+  const { AutoJudge } = await import('./services/auto-judge.js');
+  const autoJudge = new AutoJudge(providers);
+  autoJudge.start();
+
+  const { createArenaRouter, setAutoJudge } = await import('./arena/routes.js');
+  setAutoJudge(autoJudge);
   app.use('/arena', createArenaRouter(providers));
 
-  // Health endpoint
   app.get('/health', (req, res) => {
     res.json({
       status: 'ok',
@@ -86,7 +102,6 @@ async function main() {
     });
   });
 
-  // Start server
   const server = app.listen(PORT, HOST, () => {
     console.log(`
   ╔═══════════════════════════════════════════════╗
@@ -113,10 +128,11 @@ async function main() {
 `);
   });
 
-  // Graceful shutdown
   function shutdown(signal) {
     console.log(`\n[prism] ${signal} received, shutting down...`);
     monitor.stop();
+    modelSync.stop();
+    autoJudge.stop();
     server.close(() => {
       try { getDb().close(); } catch {}
       console.log('[prism] Goodbye.');

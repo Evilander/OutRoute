@@ -19,6 +19,13 @@ function resolveProvider(model, providers) {
       return { name, provider };
     }
   }
+  // OpenRouter models contain a slash (e.g., meta-llama/llama-3-8b-instruct)
+  if (model.includes('/')) {
+    const provider = providers.get('openrouter');
+    if (provider && provider.ownsModel(model)) {
+      return { name: 'openrouter', provider };
+    }
+  }
   // Infer provider from model name prefixes
   const prefixMap = {
     'gpt-': 'openai',
@@ -66,7 +73,6 @@ async function runSingleModel(model, providerInfo, messages, options) {
     const result = await providerInfo.provider.chat(messages, {
       model,
       maxTokens: options.maxTokens,
-      max_tokens: options.maxTokens,
       temperature: options.temperature,
     });
     const latencyMs = Math.round(performance.now() - start);
@@ -117,14 +123,12 @@ export async function runBattle(prompt, models, providers, options = {}) {
     throw new Error('No valid providers found for any of the requested models');
   }
 
-  // Run all models in parallel
   const results = await Promise.allSettled(
     modelProviders.map(({ model, providerInfo }) =>
       runSingleModel(model, providerInfo, messages, { maxTokens, temperature })
     )
   );
 
-  // Collect successful and failed results
   const entries = [];
   for (const result of results) {
     if (result.status === 'fulfilled') {
@@ -144,10 +148,7 @@ export async function runBattle(prompt, models, providers, options = {}) {
     ? prompt
     : messages.map(m => `${m.role}: ${m.content}`).join('\n');
 
-  // Create battle in DB
   const battleId = createBattle(promptText.slice(0, 500), taskType);
-
-  // Store entries with randomized positions
   const storedEntries = [];
   for (let i = 0; i < shuffled.length; i++) {
     const entry = shuffled[i];
@@ -200,7 +201,6 @@ export async function voteBattle(battleId, winnerEntryId) {
     throw new Error(`Entry ${winnerEntryId} not found in battle ${battleId}`);
   }
 
-  // Record the winner in the DB
   setBattleWinner(battleId, winnerEntryId);
 
   // Update ELO: winner vs every other entry (loser)

@@ -9,11 +9,19 @@ let db;
 
 export function getDb() {
   if (!db) {
-    db = new Database(join(__dirname, '../../prism.db'));
+    const dbPath = process.env.DB_PATH || join(__dirname, '../../prism.db');
+    db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
     db.exec(schema);
+    // Additive column migrations (safe to re-run; SQLite throws if column exists)
+    for (const sql of [
+      'ALTER TABLE requests ADD COLUMN routing_reason TEXT',
+      'ALTER TABLE evaluations ADD COLUMN judge_consistency_score REAL',
+    ]) {
+      try { db.prepare(sql).run(); } catch {}
+    }
   }
   return db;
 }
@@ -22,9 +30,9 @@ export function getDb() {
 
 export function logRequest(data) {
   return getDb().prepare(`
-    INSERT INTO requests (provider, model, strategy, prompt_preview, input_tokens, output_tokens, total_tokens, latency_ms, cost_usd, status, error_message, task_type)
-    VALUES (@provider, @model, @strategy, @promptPreview, @inputTokens, @outputTokens, @totalTokens, @latencyMs, @costUsd, @status, @errorMessage, @taskType)
-  `).run(data);
+    INSERT INTO requests (provider, model, strategy, prompt_preview, input_tokens, output_tokens, total_tokens, latency_ms, cost_usd, status, error_message, task_type, routing_reason)
+    VALUES (@provider, @model, @strategy, @promptPreview, @inputTokens, @outputTokens, @totalTokens, @latencyMs, @costUsd, @status, @errorMessage, @taskType, @routingReason)
+  `).run({ routingReason: null, ...data });
 }
 
 export function getRequestStats(hours = 24) {
@@ -106,15 +114,42 @@ export function getBattle(battleId) {
 }
 
 export function getRecentBattles(limit = 20) {
-  const battles = getDb().prepare(
-    'SELECT * FROM battles ORDER BY timestamp DESC LIMIT ?'
-  ).all(limit);
-  for (const battle of battles) {
-    battle.entries = getDb().prepare(
-      'SELECT id, provider, model, latency_ms, cost_usd, is_winner, position FROM battle_entries WHERE battle_id = ? ORDER BY position'
-    ).all(battle.id);
+  const rows = getDb().prepare(`
+    SELECT
+      b.id AS battle_id, b.timestamp, b.prompt, b.task_type, b.status,
+      e.id AS entry_id, e.provider, e.model, e.latency_ms, e.cost_usd,
+      e.is_winner, e.position
+    FROM battles b
+    LEFT JOIN battle_entries e ON e.battle_id = b.id
+    WHERE b.id IN (SELECT id FROM battles ORDER BY timestamp DESC LIMIT ?)
+    ORDER BY b.timestamp DESC, e.position ASC
+  `).all(limit);
+
+  const battleMap = new Map();
+  for (const row of rows) {
+    if (!battleMap.has(row.battle_id)) {
+      battleMap.set(row.battle_id, {
+        id: row.battle_id,
+        timestamp: row.timestamp,
+        prompt: row.prompt,
+        task_type: row.task_type,
+        status: row.status,
+        entries: [],
+      });
+    }
+    if (row.entry_id != null) {
+      battleMap.get(row.battle_id).entries.push({
+        id: row.entry_id,
+        provider: row.provider,
+        model: row.model,
+        latency_ms: row.latency_ms,
+        cost_usd: row.cost_usd,
+        is_winner: row.is_winner,
+        position: row.position,
+      });
+    }
   }
-  return battles;
+  return [...battleMap.values()];
 }
 
 // --- ELO Ratings ---
@@ -179,6 +214,73 @@ export function updateProviderHealth(provider, status, latencyMs = null) {
 
 export function getProviderHealth() {
   return getDb().prepare('SELECT * FROM provider_health').all();
+}
+
+// --- Model Registry ---
+
+export function upsertModel(model) {
+  getDb().prepare(`
+    INSERT INTO model_registry (id, provider, provider_model_id, display_name, context_window, price_prompt_1k, price_completion_1k, is_active, updated_at)
+    VALUES (@id, @provider, @providerModelId, @displayName, @contextWindow, @pricePrompt1k, @priceCompletion1k, 1, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      display_name = @displayName,
+      context_window = @contextWindow,
+      price_prompt_1k = @pricePrompt1k,
+      price_completion_1k = @priceCompletion1k,
+      is_active = 1,
+      updated_at = datetime('now')
+  `).run(model);
+}
+
+export function upsertModels(models) {
+  const d = getDb();
+  const txn = d.transaction(() => {
+    for (const model of models) {
+      upsertModel(model);
+    }
+  });
+  txn();
+}
+
+export function getRegistryModels(provider) {
+  if (provider) {
+    return getDb().prepare(
+      'SELECT * FROM model_registry WHERE provider = ? AND is_active = 1'
+    ).all(provider);
+  }
+  return getDb().prepare(
+    'SELECT * FROM model_registry WHERE is_active = 1'
+  ).all();
+}
+
+export function getRegistryModel(id) {
+  return getDb().prepare(
+    'SELECT * FROM model_registry WHERE id = ? AND is_active = 1'
+  ).get(id);
+}
+
+export function deactivateStaleModels(provider, activeIds) {
+  if (activeIds.length === 0) return;
+  const placeholders = activeIds.map(() => '?').join(',');
+  getDb().prepare(`
+    UPDATE model_registry SET is_active = 0
+    WHERE provider = ? AND id NOT IN (${placeholders})
+  `).run(provider, ...activeIds);
+}
+
+// --- Evaluations ---
+
+export function createEvaluation(data) {
+  return getDb().prepare(`
+    INSERT INTO evaluations (battle_id, model_a, model_b, winner_model, judge_model, inferred_domain, reasoning, is_auto)
+    VALUES (@battleId, @modelA, @modelB, @winnerModel, @judgeModel, @inferredDomain, @reasoning, @isAuto)
+  `).run(data);
+}
+
+export function getEvaluation(battleId) {
+  return getDb().prepare(
+    'SELECT * FROM evaluations WHERE battle_id = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(battleId);
 }
 
 export function getHealthyProviders() {

@@ -91,7 +91,7 @@
               <div class="loading-overlay"><div class="spinner"></div></div>
             </div>
             <div style="display: flex; gap: 12px; margin-top: 12px; align-items: center;">
-              <button class="btn btn-primary" id="btn-battle" onclick="startBattle()">Start Battle</button>
+              <button class="btn btn-primary" id="btn-battle">Start Battle</button>
               <span id="battle-status" class="stat-label"></span>
             </div>
           </div>
@@ -100,8 +100,14 @@
         <div id="battle-results" style="display: none;">
           <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-              <div class="card-title" style="margin-bottom: 0;">Battle Results — Vote for the best response</div>
-              <button class="btn btn-secondary" id="btn-reveal" onclick="revealBattle()" style="display: none;">Reveal Models</button>
+              <div>
+                <div class="card-title" style="margin-bottom: 2px;">Battle Results — Vote for the best response</div>
+                <div class="stat-label" id="keyboard-hint">Press 1, 2, 3... to vote by keyboard</div>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button class="btn btn-secondary" id="btn-copy-result" style="display: none;">Copy Result</button>
+                <button class="btn btn-secondary" id="btn-reveal" style="display: none;">Reveal Models</button>
+              </div>
             </div>
             <div class="battle-responses" id="battle-responses"></div>
           </div>

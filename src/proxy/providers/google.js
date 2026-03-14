@@ -2,15 +2,15 @@ import { BaseProvider, ProviderError } from './base.js';
 
 const MODELS = [
   {
-    id: 'gemini-2.0-flash',
-    name: 'Gemini 2.0 Flash',
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
     contextWindow: 1_000_000,
     costPer1kInput: 0.0001,
     costPer1kOutput: 0.0004,
   },
   {
-    id: 'gemini-1.5-pro',
-    name: 'Gemini 1.5 Pro',
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
     contextWindow: 2_000_000,
     costPer1kInput: 0.00125,
     costPer1kOutput: 0.005,
@@ -166,7 +166,7 @@ export class GoogleProvider extends BaseProvider {
       });
     }
 
-    const model = options.model || 'gemini-2.0-flash';
+    const model = options.model || 'gemini-2.5-flash';
     const startTime = Date.now();
 
     if (options.stream) {
@@ -214,7 +214,7 @@ export class GoogleProvider extends BaseProvider {
   }
 
   async *#streamChat(messages, options, startTime) {
-    const model = options.model || 'gemini-2.0-flash';
+    const model = options.model || 'gemini-2.5-flash';
     const body = this.#buildRequestBody(messages, options);
     const url = `${this.#baseUrl}/models/${model}:streamGenerateContent?key=${this.#apiKey}&alt=sse`;
 
