@@ -1,55 +1,61 @@
 import { randomUUID } from 'crypto';
 import { createBattle, addBattleEntry } from '../db/store.js';
+import { TASK_TYPES, detectTaskType } from '../tasks.js';
+import { resolveProvider, dedupeModels } from './arena.js';
+
+const PROMPT_CAP = 32_000;
+const SESSION_TTL_MS = 30 * 60 * 1000;
+// How long a finalized session's battleId stays reachable for a retried finalize
+// call. Longer than the session TTL so a slow duplicate request still resolves
+// idempotently instead of hitting a 404.
+const FINALIZED_TTL_MS = 60 * 60 * 1000;
 
 const sessions = new Map();
+const finalizedSessions = new Map(); // sessionId -> { battleId, at }
 
-// Cleanup sessions older than 30 minutes
 setInterval(() => {
-  const cutoff = Date.now() - 30 * 60 * 1000;
+  const now = Date.now();
   for (const [id, session] of sessions) {
-    if (session.createdAt < cutoff) {
-      sessions.delete(id);
-    }
+    if (now - session.createdAt > SESSION_TTL_MS) sessions.delete(id);
+  }
+  for (const [id, record] of finalizedSessions) {
+    if (now - record.at > FINALIZED_TTL_MS) finalizedSessions.delete(id);
   }
 }, 60_000).unref();
 
-function resolveProvider(model, providers) {
-  // Check OpenRouter first (models with slashes)
-  if (model.includes('/')) {
-    const provider = providers.get('openrouter');
-    if (provider && provider.ownsModel(model)) {
-      return { name: 'openrouter', provider };
-    }
-  }
-  for (const [name, provider] of providers) {
-    if (provider.ownsModel && provider.ownsModel(model)) {
-      return { name, provider };
-    }
-  }
-  return null;
+function httpError(message, status) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+function textOf(message) {
+  if (typeof message?.content === 'string') return message.content;
+  if (Array.isArray(message?.content)) return message.content.map(p => p?.text || '').join(' ');
+  return '';
 }
 
 export function initSession(prompt, models, providers, options = {}) {
-  const sessionId = randomUUID();
-  const taskType = options.taskType || 'general';
+  const uniqueModels = dedupeModels(models);
+  const messages = typeof prompt === 'string' ? [{ role: 'user', content: prompt }] : prompt;
+  const taskType = TASK_TYPES.includes(options.taskType) ? options.taskType : detectTaskType(messages);
 
-  // Shuffle models for blind evaluation
-  const shuffled = [...models];
+  const shuffled = [...uniqueModels];
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
 
   const combatants = shuffled.map((model, idx) => {
-    const combatantId = randomUUID();
     const resolved = resolveProvider(model, providers);
     return {
-      combatantId,
+      combatantId: randomUUID(),
       model,
       provider: resolved?.name || null,
       providerInstance: resolved?.provider || null,
       position: idx + 1,
       completed: false,
+      streaming: false,
       response: '',
       inputTokens: 0,
       outputTokens: 0,
@@ -58,12 +64,17 @@ export function initSession(prompt, models, providers, options = {}) {
     };
   });
 
-  const promptText = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
-  const battleId = createBattle(promptText.slice(0, 500), taskType);
+  const resolvedCount = combatants.filter(c => c.providerInstance !== null).length;
+  if (resolvedCount < 2) {
+    throw httpError('At least 2 resolvable models are required for a session', 400);
+  }
+
+  const promptText = (typeof prompt === 'string' ? prompt : messages.map(m => `${m.role}: ${textOf(m)}`).join('\n')).slice(0, PROMPT_CAP);
+  const battleId = Number(createBattle(promptText, taskType, options.origin || 'arena'));
 
   const session = {
-    sessionId,
-    battleId: Number(battleId),
+    sessionId: randomUUID(),
+    battleId,
     prompt,
     taskType,
     combatants,
@@ -72,18 +83,14 @@ export function initSession(prompt, models, providers, options = {}) {
     temperature: options.temperature ?? 0.7,
     maxTokens: options.maxTokens || 1024,
   };
-
-  sessions.set(sessionId, session);
+  sessions.set(session.sessionId, session);
 
   return {
-    sessionId,
-    battleId: session.battleId,
+    sessionId: session.sessionId,
+    battleId,
     combatants: combatants
       .filter(c => c.providerInstance !== null)
-      .map(c => ({
-        id: c.combatantId,
-        position: c.position,
-      })),
+      .map(c => ({ id: c.combatantId, position: c.position })),
   };
 }
 
@@ -91,105 +98,111 @@ export function getSession(sessionId) {
   return sessions.get(sessionId) || null;
 }
 
-export function getCombatant(sessionId, combatantId) {
+// Streams one combatant's reply. `signal` lets the route cancel the upstream
+// provider call the moment the client disconnects, instead of only stopping
+// local writes while the outbound request keeps running to completion.
+export async function* streamCombatant(sessionId, combatantId, signal) {
   const session = sessions.get(sessionId);
-  if (!session) return null;
-  return session.combatantMap.get(combatantId) || null;
-}
-
-export async function* streamCombatant(sessionId, combatantId) {
-  const session = sessions.get(sessionId);
-  if (!session) throw new Error('Session not found');
+  if (!session) throw httpError('Session not found', 404);
 
   const combatant = session.combatantMap.get(combatantId);
-  if (!combatant) throw new Error('Combatant not found');
-  if (!combatant.providerInstance) throw new Error('No provider for this model');
+  if (!combatant) throw httpError('Combatant not found', 404);
+  if (!combatant.providerInstance) throw httpError('No provider for this model', 400);
+  if (combatant.completed) throw httpError('This combatant has already streamed', 409);
+  // Claims the combatant synchronously, before any await: two concurrent
+  // requests for the same sessionId+combatantId both reach this point only
+  // if neither has run yet, and whichever's synchronous prefix executes
+  // first sets the flag before the other's check can observe it — Node
+  // never interleaves two synchronous stretches of code. Without this, both
+  // callers pass the `completed` check and both invoke the real (billable)
+  // provider, with one response silently clobbering the other.
+  if (combatant.streaming) throw httpError('This combatant is already streaming', 409);
+  combatant.streaming = true;
 
-  const messages = typeof session.prompt === 'string'
-    ? [{ role: 'user', content: session.prompt }]
-    : session.prompt;
-
+  const messages = typeof session.prompt === 'string' ? [{ role: 'user', content: session.prompt }] : session.prompt;
   const startTime = Date.now();
 
   try {
-    const result = await combatant.providerInstance.chat(messages, {
+    const stream = await combatant.providerInstance.chat(messages, {
       model: combatant.model,
       temperature: session.temperature,
       maxTokens: session.maxTokens,
       stream: true,
+      signal,
     });
 
-    if (result && typeof result[Symbol.asyncIterator] === 'function') {
-      let fullContent = '';
-      for await (const chunk of result) {
-        const content = typeof chunk === 'string' ? chunk
-          : (chunk.content || chunk.delta?.content || '');
+    let fullContent = '';
+    for await (const chunk of stream) {
+      // The done chunk never carries content — only delta chunks are appended,
+      // so a provider that (incorrectly) put text on done can't double the reply.
+      if (chunk?.type === 'delta') {
+        const content = chunk.content || '';
         if (content) {
           fullContent += content;
           yield { type: 'delta', content };
         }
-        // Capture token counts from final chunk
-        if (chunk.type === 'done' || chunk.inputTokens) {
-          combatant.inputTokens = chunk.inputTokens || 0;
-          combatant.outputTokens = chunk.outputTokens || 0;
-        }
-      }
-      combatant.response = fullContent;
-    } else {
-      // Non-streaming response — simulate stream
-      const content = result.content || '';
-      combatant.response = content;
-      combatant.inputTokens = result.inputTokens || 0;
-      combatant.outputTokens = result.outputTokens || 0;
-
-      // Yield in word-sized chunks for natural feel
-      const words = content.split(/(\s+)/);
-      for (const word of words) {
-        if (word) yield { type: 'delta', content: word };
+      } else if (chunk?.type === 'done') {
+        combatant.inputTokens = chunk.inputTokens || 0;
+        combatant.outputTokens = chunk.outputTokens || 0;
       }
     }
 
+    combatant.response = fullContent;
     combatant.latencyMs = Date.now() - startTime;
     combatant.completed = true;
-
     yield { type: 'done', latencyMs: combatant.latencyMs };
   } catch (err) {
     combatant.latencyMs = Date.now() - startTime;
-    combatant.error = err.message;
+    combatant.error = err.name === 'AbortError' ? 'client disconnected' : (err.message || String(err));
+    // Marked completed even on abort/failure: an unfinished combatant would
+    // otherwise block finalize forever if the client never reconnects to it.
     combatant.completed = true;
-    yield { type: 'error', message: err.message };
+    yield { type: 'error', message: err.name === 'AbortError' ? 'stream cancelled' : combatant.error };
+  } finally {
+    // Cleared even when this generator is cancelled early (the route breaks
+    // its for-await loop on client disconnect, which calls .return() here
+    // without going through the catch above) so a retry of a never-completed
+    // combatant isn't locked out forever.
+    combatant.streaming = false;
   }
 }
 
 export function finalizeSession(sessionId) {
+  const already = finalizedSessions.get(sessionId);
+  if (already) return already.battleId;
+
   const session = sessions.get(sessionId);
-  if (!session) return null;
+  if (!session) throw httpError('Session not found', 404);
+
+  const pending = session.combatants.filter(c => c.providerInstance && !c.completed);
+  if (pending.length > 0) {
+    throw httpError('Not every combatant has finished streaming yet', 409);
+  }
 
   for (const combatant of session.combatants) {
     if (!combatant.providerInstance) continue;
-
-    const cost = estimateCost(combatant);
     addBattleEntry(session.battleId, {
       provider: combatant.provider,
       model: combatant.model,
-      response: combatant.response || `[ERROR] ${combatant.error}`,
+      // A combatant that errored or was cancelled stores an empty response —
+      // never "[ERROR] ...", which is the structural signal isErroredEntry relies on.
+      response: combatant.error ? '' : combatant.response,
       inputTokens: combatant.inputTokens,
       outputTokens: combatant.outputTokens,
       latencyMs: combatant.latencyMs,
-      costUsd: cost,
+      costUsd: estimateCost(combatant),
       position: combatant.position,
     });
   }
 
+  sessions.delete(sessionId);
+  finalizedSessions.set(sessionId, { battleId: session.battleId, at: Date.now() });
   return session.battleId;
 }
 
 function estimateCost(combatant) {
-  if (!combatant.providerInstance) return 0;
-  const model = combatant.providerInstance.getModel(combatant.model);
-  if (!model) return 0;
-  const inputCost = (combatant.inputTokens / 1000) * (model.costPer1kInput || 0);
-  const outputCost = (combatant.outputTokens / 1000) * (model.costPer1kOutput || 0);
-  return Math.round((inputCost + outputCost) * 1_000_000) / 1_000_000;
+  if (!combatant.providerInstance || combatant.error) return 0;
+  return combatant.providerInstance.estimateCost
+    ? combatant.providerInstance.estimateCost(combatant.inputTokens, combatant.outputTokens, combatant.model)
+    : 0;
 }
-

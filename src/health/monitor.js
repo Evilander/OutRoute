@@ -10,6 +10,7 @@ export class HealthMonitor {
   start() {
     this.checkAll();
     this.timer = setInterval(() => this.checkAll(), this.intervalMs);
+    this.timer.unref?.();
     console.log(`[health] Monitoring ${this.providers.size} providers every ${this.intervalMs / 1000}s`);
   }
 
@@ -31,9 +32,16 @@ export class HealthMonitor {
   async checkProvider(name, provider) {
     const start = Date.now();
     try {
-      await provider.healthCheck();
-      const latency = Date.now() - start;
-      updateProviderHealth(name, 'healthy', latency);
+      const result = await provider.healthCheck();
+      const latency = result?.latencyMs ?? (Date.now() - start);
+      // Adapters report failure in the result rather than by throwing, so a
+      // resolved health check is not a healthy one.
+      if (result?.healthy) {
+        updateProviderHealth(name, 'healthy', latency);
+      } else {
+        console.error(`[health] ${name} check failed:`, result?.reason || 'unknown reason');
+        updateProviderHealth(name, 'unhealthy', latency);
+      }
     } catch (err) {
       console.error(`[health] ${name} check failed:`, err.message);
       updateProviderHealth(name, 'unhealthy');

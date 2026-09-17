@@ -1,255 +1,173 @@
 # Prism
 
-**Intelligent LLM arena + router.** Race frontier models head-to-head, build a personal ELO leaderboard, then auto-route production requests based on your preference data.
+Prism tells you which LLM is best for your own work, how sure it is, and whether the better model is worth what it costs. Then it routes your API traffic on that answer.
 
-```
-  ██████╗ ██████╗ ██╗███████╗███╗   ███╗
-  ██╔══██╗██╔══██╗██║██╔════╝████╗ ████║
-  ██████╔╝██████╔╝██║███████╗██╔████╔██║
-  ██╔═══╝ ██╔══██╗██║╚════██║██║╚██╔╝██║
-  ██║     ██║  ██║██║███████║██║ ╚═╝ ██║
-  ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚═╝
-```
+Public leaderboards rank models on other people's prompts. Prism ranks them on yours. You compare models blind on prompts from your real work, or let Prism quietly compare them on a sample of your live traffic, and it fits a rating for each model with a confidence interval. The router uses those ratings, including the uncertainty: it will not call a model "best" on the strength of three lucky wins.
 
-## Why
+![Ratings with 95% intervals](docs/ratings.png)
 
-- Provider lock-in is existential risk. You shouldn't depend on a single model.
-- 4+ frontier models ship every few weeks, each with different strengths.
-- Nobody has built the UX for navigating multi-model intelligently — until now.
-
-Prism lets you **discover** which model works best for your tasks through blind arena battles, then **automatically routes** your API calls based on that data.
-
-## Features
-
-- **Arena Mode** — Race 2-8 models on the same prompt. Blind evaluation. Vote on winners. Build a personal ELO leaderboard by task type (code, creative, analysis, general).
-- **Streaming Arena** — Stream battle responses in real-time via SSE with ephemeral session proxying to preserve blind evaluation.
-- **Auto-Judge** — LLM-as-judge with domain-conditional rubric and double-blind swap for bias mitigation. Evaluates battles automatically.
-- **OpenAI-Compatible Proxy** — Drop-in replacement at `/v1/chat/completions`. Point any OpenAI SDK at Prism and it just works.
-- **5 Providers, 100+ Models** — OpenAI, Anthropic, Google Gemini, Groq, and OpenRouter (with dynamic model sync).
-- **5 Routing Strategies** — `best` (ELO-based), `cheapest`, `fastest`, `round-robin`, or `specific` model.
-- **Automatic Failover** — If a provider goes down, requests route to the next best option.
-- **Cost Tracking** — Per-request cost calculated from actual token usage and model pricing.
-- **Provider Health Monitoring** — 60-second health checks with automatic degraded-provider avoidance.
-- **Dashboard** — Dark-themed web UI with stats, arena battles, ELO leaderboard, and request log.
-- **Docker Support** — One-command deployment via `docker compose up`.
-- **Zero Dependencies Frontend** — Vanilla HTML/CSS/JS dashboard. No framework overhead.
-
-## Supported Providers
-
-| Provider | Models | Auth |
-|----------|--------|------|
-| **OpenAI** | gpt-4o, gpt-4o-mini, gpt-4-turbo, o1 | `OPENAI_API_KEY` |
-| **Anthropic** | claude-opus-4, claude-sonnet-4, claude-haiku-4.5 | `ANTHROPIC_API_KEY` |
-| **Google Gemini** | gemini-2.5-flash, gemini-2.5-pro, gemini-1.5-flash | `GOOGLE_API_KEY` |
-| **Groq** | llama-3.3-70b, llama-3.1-8b, mixtral-8x7b | `GROQ_API_KEY` |
-| **OpenRouter** | 100+ models (dynamic sync) | `OPENROUTER_API_KEY` |
-
-Only providers with configured API keys are loaded. You can run with just one.
-
-OpenRouter models are synced automatically every 12 hours from the OpenRouter API. Adding an OpenRouter key gives you instant access to models from Meta, Mistral, Cohere, and many more.
-
-## Quick Start
+## Try it without any API keys
 
 ```bash
 git clone https://github.com/Evilander/prism.git
 cd prism
 npm install
-cp .env.example .env
-# Edit .env — add at least one API key
-node src/index.js
+npm run demo
 ```
 
-Open http://localhost:3080 for the dashboard.
+Open http://localhost:3080. Demo mode uses four built-in mock models of differing quality, speed and price, seeds a few hundred comparisons between them, and lets you run blind comparisons, vote, and watch the ratings and the cost/quality chart respond. Nothing leaves your machine.
 
-### Docker
+To use real models, copy `.env.example` to `.env`, add a key for at least one provider, and run `npm start`.
 
-```bash
-cp .env.example .env
-# Edit .env — add API keys
-docker compose up -d
-```
+## How it works
 
-Data persists in a Docker volume (`prism-data`).
+**1. Comparisons.** Every piece of evidence is one pairwise outcome: model A beat model B, or they tied, on some prompt. Comparisons come from three places:
 
-## Usage
+- You, voting blind in the dashboard. Responses are unlabelled and shuffled, and cost and token counts are hidden until you vote, because price alone gives most models away.
+- An LLM judge, which rules on every comparison in the background.
+- Shadow evaluation, which replays a fraction of your real proxy traffic to a second model and hands both responses to the judge. It is off by default and has a hard daily spend cap.
 
-### As an OpenAI-compatible proxy
+**2. Ratings.** Prism fits a [Bradley-Terry model](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) to the whole comparison log at once, the same family of model LMArena uses, and runs a parametric bootstrap (replay every recorded game 200 times with the fitted win probabilities, refit each time) to get a 95% interval per model. Replaying, not resampling, matters at this scale: a model that has won all five of its games would otherwise get an interval of zero width. Ratings are never stored. They are recomputed from the log, so they do not depend on the order battles happened in, and a fix to the method re-rates all your history. Ties count as half a win each. Ratings are kept per task type (code, analysis, creative, general) and pooled.
 
-Point any OpenAI SDK at `http://localhost:3080/v1`:
+The earlier version of Prism used online Elo. On a personal dataset that is the wrong tool: the result depends on battle order, and it gives no hint of how little twenty votes actually tell you.
+
+**3. Routing.** Point any OpenAI-compatible client at Prism and pick a strategy:
+
+| Strategy | Picks |
+|---|---|
+| `best` | The highest-rated model for the detected task type, among models with at least 5 games. |
+| `value` | The cheapest model that Prism cannot say is worse than the leader. |
+| `cheapest` | The lowest blended price. Models with an unknown price are skipped. |
+| `fastest` | The lowest average latency over successful calls in the last 24 hours. |
+| `round-robin` | Each model in turn. |
+
+`value` is the one to understand. For every rated model it asks: in what share of the bootstrap refits does this model rate below the leader? If that share is under 90%, the data has not shown the model to be worse, so it stays in contention, and the cheapest contender wins. With no data, everything is in contention and you get the cheapest model. As your comparisons show that a pricier model really is better on your prompts, `value` moves up to it, and only then.
+
+That default is deliberately slow to spend your money, and it has a cost: a model that is 75% likely to be worse than the leader still counts as "not shown worse" and can be picked. If you would rather move to the better model as soon as it is more likely than not, set `PRISM_VALUE_CONFIDENCE=0.5`. Models with fewer than 5 games are never considered, however cheap; compare them first, or let shadow evaluation do it.
+
+Naming a model in the request bypasses all of this and routes to that model. If it fails, the request fails with the provider's own status code (a 404 for a retired model, a 429 for a rate limit); Prism does not answer with a different model. The provider's error text goes to the server log, not into the response.
+
+![Cost against quality](docs/frontier.png)
+
+## How much data do you need?
+
+More than you would guess. This table comes from simulating games between four models whose true ratings are 1600, 1550, 1500 and 1400, forty trials per row (`node scripts/interval-width.js`):
+
+| Comparisons | Median 95% interval | True best model ranked first |
+|---:|---:|---:|
+| 20 | ±197 | 50% |
+| 50 | ±116 | 75% |
+| 100 | ±77 | 73% |
+| 200 | ±55 | 93% |
+| 500 | ±35 | 95% |
+| 1000 | ±24 | 100% |
+
+Twenty votes is a coin flip between closely matched models. That is why the intervals are on screen everywhere, why models with fewer than 5 games are never routed on, and why shadow evaluation exists: it gets you to a few hundred comparisons without a few hundred evenings of voting.
+
+## Checking the judge
+
+An LLM judge has known biases: it favours whichever response it reads first, it favours longer responses, and it favours its own family's writing ([Zheng et al., 2023](https://arxiv.org/abs/2306.05685)). Prism does what is cheap to do about each, and then measures what is left:
+
+- Every pair is judged twice with the positions swapped. If the two verdicts disagree, the pair is recorded as a tie, not as a win for anyone.
+- The judge is chosen from a provider that has no model in the comparison. If that provider is not answering (an expired key, an account out of credit), the next candidate rules instead, and a judge that does share a provider with a contestant is labelled as such.
+- The judge is told not to reward length, and the dashboard shows how often it picked the longer response anyway.
+- When you vote on a comparison the judge also ruled on, your verdict replaces the judge's in the ratings, and the pair is counted toward the judge's agreement rate with you (raw agreement and Cohen's kappa). If that number is poor, switch the leaderboard to "my votes only".
+
+## Using the proxy
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://localhost:3080/v1",
-    api_key="any-string"  # or your PRISM_SECRET if auth is enabled
-)
+client = OpenAI(base_url="http://localhost:3080/v1", api_key="unused")  # or your PRISM_SECRET
 
-# Specific model
+# Let Prism choose. extra_body carries the strategy.
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}]
+    model="auto",
+    messages=[{"role": "user", "content": "Write a Python merge sort"}],
+    extra_body={"strategy": "value"},
 )
-
-# Auto-route (uses "best" strategy — picks highest ELO model for the task type)
-# Omit the model field entirely — Prism selects based on your ELO data
-response = client.chat.completions.create(
-    messages=[{"role": "user", "content": "Write a Python merge sort"}]
-)
+print(response.model)                      # the model that answered
+print(response.model_extra["prism"])       # why it was chosen, cost, latency, failover
 ```
 
-The response includes a `prism` metadata block with provider, strategy, latency, cost, and failover info.
+Streaming works. `temperature`, `top_p`, `stop`, `seed`, the penalties, `response_format`, `tools` and `tool_choice` are forwarded; anything Prism ignored is listed in `prism.ignored_params` instead of vanishing. When Prism chose the model and the provider fails, it tries up to two more, moving to a different provider before it tries the same one again. Providers with three consecutive failures go to the back of the queue.
 
-### Arena battles
+## Command line
 
 ```bash
-# Start a blind battle
-curl -X POST http://localhost:3080/arena/battle \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Explain quantum entanglement in simple terms",
-    "models": ["gpt-4o-mini", "claude-haiku-4-5-20251001"]
-  }'
-
-# Vote on position 2 as winner
-curl -X POST http://localhost:3080/arena/vote \
-  -H "Content-Type: application/json" \
-  -d '{"battleId": 1, "winnerPosition": 2}'
-
-# Reveal which model was which (only works after voting)
-curl http://localhost:3080/arena/reveal/1
-
-# Check the leaderboard
-curl http://localhost:3080/arena/leaderboard
+npx prism demo                                   # seeded demo on mock models
+npx prism eval prompts.txt --models a,b,c        # run every prompt against every model, judge, print ratings
+npx prism leaderboard --task code                # current ratings from the database
+npx prism route "refactor this function" --strategy value   # which model would be picked, and why (no request sent)
+npx prism export > comparisons.jsonl             # your comparison log, one JSON object per line
 ```
 
-### Streaming arena (SSE)
+`prompts.txt` is one prompt per line; a `.jsonl` file of `{"prompt": "..."}` objects also works.
 
-```bash
-# Initialize a streaming session (returns opaque combatant UUIDs for blind eval)
-curl -X POST http://localhost:3080/arena/session \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain monads", "models": ["gpt-4o-mini", "claude-haiku-4-5-20251001"]}'
-# Returns: { sessionId, combatants: [{ id, position }] }
+## Providers
 
-# Stream each combatant's response (EventSource / SSE)
-curl http://localhost:3080/arena/stream/{sessionId}/{combatantId}
+OpenAI, Anthropic, Google Gemini, xAI, Mistral, Groq and OpenRouter by API key, and local models through Ollama. Model lists are read from each provider's own API at startup, so any model your key can reach can be named in a request or entered in a comparison. The router is pickier: left to itself it chooses only among a short curated list per provider (flagship, mid, small) plus any model you have compared, because a live catalog also lists every legacy snapshot a provider still serves. `PRISM_POOL` overrides that.
 
-# Finalize session (stores entries, triggers auto-judge)
-curl -X POST http://localhost:3080/arena/session/{sessionId}/finalize
-```
-
-### Auto-judge
-
-When at least one LLM provider is available, Prism automatically evaluates arena battles using a domain-conditional rubric with double-blind swap to mitigate positional bias. Auto-judged results update ELO ratings without manual voting. Set `"autoJudge": false` in the battle request to disable.
-
-### Routing strategies
-
-Pass `strategy` in the request body to control model selection:
-
-| Strategy | Behavior |
-|----------|----------|
-| `best` | Highest ELO rating for the detected task type (default) |
-| `cheapest` | Lowest cost per 1K tokens |
-| `fastest` | Lowest average latency from historical data |
-| `round-robin` | Rotate through all available models |
-| `specific` | Used automatically when you specify a model name |
+Prices come from OpenRouter's public model catalog. A model whose price cannot be matched is shown as "unknown" and is left out of `cheapest` and `value`; it is never treated as free.
 
 ## Configuration
 
-```env
-# Provider API keys (add at least one)
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-GOOGLE_API_KEY=AI...
-GROQ_API_KEY=gsk_...
+Everything is in `.env.example` with comments. The settings that matter most:
 
-# Server
-PORT=3080
-HOST=localhost
+| Variable | Default | |
+|---|---|---|
+| `DEFAULT_STRATEGY` | `best` | Used when a request names neither a model nor a strategy. |
+| `PRISM_POOL` | curated models plus compared ones | Comma-separated model ids the router may choose between. |
+| `SHADOW_RATE` | `0` | Fraction of proxy requests to replay to a challenger model. |
+| `SHADOW_DAILY_BUDGET_USD` | `1.00` | Shadow evaluation stops for the day when challenger plus judge spend reaches this. |
+| `PRISM_SECRET` | unset | When set, every API call needs `Authorization: Bearer <secret>`. |
+| `HOST` | `localhost` | Set `PRISM_SECRET` before changing this. |
 
-# Default routing strategy
-DEFAULT_STRATEGY=best
+## What Prism is not
 
-# Optional: require Bearer token auth on API endpoints
-# PRISM_SECRET=your-secret-here
-```
+Prism is not a production gateway. If you need virtual keys, team budgets, caching, guardrails, or a hundred provider integrations, use [LiteLLM](https://github.com/BerriAI/litellm). LiteLLM also has shadow evaluations: it samples a key's traffic, replays it through its auto-router, and reports a win rate to help you decide whether to switch. Prism's version feeds a rating model that the router acts on continuously, with intervals. If you only want the gateway, LiteLLM is the better tool.
 
-When `PRISM_SECRET` is set, all API endpoints require `Authorization: Bearer <secret>`. The dashboard and health endpoint remain accessible without auth.
+It is also single-user: one SQLite file, one set of preferences, no accounts.
 
-## API Endpoints
+Other limits worth knowing before you rely on it:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | OpenAI-compatible chat proxy |
-| `/v1/models` | GET | List available models |
-| `/arena/battle` | POST | Start a blind arena battle |
-| `/arena/vote` | POST | Vote on a battle winner |
-| `/arena/reveal/:id` | GET | Reveal model identities (after voting) |
-| `/arena/leaderboard` | GET | ELO rankings (optional `?taskType=` filter) |
-| `/arena/session` | POST | Start a streaming arena session |
-| `/arena/stream/:session/:combatant` | GET | SSE stream for a combatant |
-| `/arena/session/:id/finalize` | POST | Finalize streaming session |
-| `/arena/battles` | GET | Recent battle history |
-| `/api/stats` | GET | Request statistics |
-| `/api/stats/timeline` | GET | Cost timeline by hour |
-| `/api/requests` | GET | Recent request log |
-| `/api/providers` | GET | Provider list with health status |
-| `/api/models` | GET | All models with pricing info |
-| `/health` | GET | Server health check |
-
-## Architecture
-
-```
-src/
-├── index.js                  Entry point, Express setup, auth, shutdown
-├── proxy/
-│   ├── server.js             API proxy + stats endpoints
-│   ├── router.js             Routing logic (strategy, failover, cost)
-│   └── providers/
-│       ├── base.js           Abstract provider interface
-│       ├── openai.js          OpenAI adapter
-│       ├── anthropic.js       Anthropic adapter
-│       ├── google.js          Google Gemini adapter
-│       ├── groq.js            Groq adapter (extends OpenAI)
-│       ├── openrouter.js      OpenRouter adapter (100+ dynamic models)
-│       └── index.js           Provider factory
-├── arena/
-│   ├── arena.js              Battle execution (parallel racing)
-│   ├── streaming.js          Streaming arena (ephemeral sessions, SSE)
-│   ├── scorer.js             ELO calculation
-│   └── routes.js             Arena API endpoints
-├── services/
-│   ├── model-sync.js         OpenRouter model sync (12h background job)
-│   └── auto-judge.js         LLM-as-judge with double-blind evaluation
-├── dashboard/
-│   ├── index.html            Web UI
-│   ├── style.css             Dark theme
-│   └── app.js                Dashboard logic (safe DOM, no innerHTML)
-├── db/
-│   ├── schema.sql            SQLite schema
-│   └── store.js              Database operations
-└── health/
-    └── monitor.js            Provider health checking
-```
-
-## Stack
-
-- **Runtime:** Node.js (ES modules)
-- **Server:** Express 5
-- **Database:** SQLite via better-sqlite3 (zero config, WAL mode)
-- **Frontend:** Vanilla HTML/CSS/JS (no build step)
-- **Dependencies:** 4 (express, better-sqlite3, dotenv, helmet)
+- Tool calling only works on OpenAI-compatible providers (OpenAI, xAI, Mistral, Groq, OpenRouter, Ollama). A request with `tools` is routed only to those. Naming an Anthropic or Gemini model with `tools` returns a 400 rather than silently answering as plain chat.
+- Shadow evaluation copies prompts. A sampled request is sent to a second provider and to the judge's provider, and both responses are stored in the local database. Requests with tools or images, and any request sent with an `x-prism-no-shadow` header, are never sampled. Leave it off for traffic you would not send to a second vendor.
+- Task detection is a keyword heuristic. It decides which rating table a request reads from, and it is wrong sometimes. Pass `taskType` in arena requests when you know better.
+- The judge is a model and makes mistakes. The Judge tab exists so you can see how often.
+- Only differences between ratings mean anything. The scale is pinned so that an average model sits near 1500; the level itself carries no information.
+- A rating gap predicts an expected score in which a tie counts as half a win. If many of your comparisons end in ties (the judge records a tie whenever its two verdicts disagree), gaps come out smaller than they would from decisive results alone. The order of the models is not affected.
+- Ratings are keyed by model id. The same id served by two providers is treated as one model.
 
 ## Security
 
-- Optional bearer token auth via `PRISM_SECRET`
-- Rate limiting: 60 requests/min per IP on proxy endpoint
-- Input validation: temperature clamped 0-2, max_tokens capped at 16384
-- Parameterized SQL queries throughout (no injection risk)
-- Safe DOM manipulation in dashboard (no innerHTML with user content)
-- API keys stored in private class fields, never serialized to responses
-- Graceful shutdown on SIGINT/SIGTERM
+Prism holds your provider API keys, so it is careful about who can reach it. It listens on `localhost` by default, rejects requests whose `Host` header is not a loopback name (which blocks DNS rebinding), sends no CORS headers unless you set `CORS_ORIGIN`, and serves the dashboard under a strict Content-Security-Policy with no third-party assets. The Docker Compose file publishes the port on `127.0.0.1` only. If you expose Prism to a network, set `PRISM_SECRET`.
+
+## API
+
+| Endpoint | |
+|---|---|
+| `POST /v1/chat/completions` | OpenAI-compatible chat, streaming or not |
+| `GET /v1/models` | Every model that can be named; `routable` marks the ones the router picks from |
+| `POST /arena/battle` | Run a blind comparison; responses come back unlabelled |
+| `POST /arena/session`, `GET /arena/stream/:session/:combatant`, `POST /arena/session/:id/finalize` | The same, streamed |
+| `POST /arena/vote` | `{battleId, winnerPosition}` or `{battleId, tie: true}` |
+| `GET /arena/reveal/:id` | Model identities, after you vote (`?forfeit=1` to give up the vote) |
+| `GET /arena/battles` | Recent comparisons; models stay hidden while one is awaiting your vote |
+| `GET /arena/leaderboard` | Ratings with intervals; `?taskType=` and `?source=human\|judge\|all` |
+| `GET /arena/judge` | Which judge is in use and how well it agrees with you |
+| `GET /api/frontier` | Price and rating per model, with frontier membership |
+| `GET /api/shadow` | Shadow evaluation status and today's spend |
+| `GET /api/stats`, `/api/requests`, `/api/providers` | Traffic, request log, provider health |
+| `GET /health`, `GET /api/config` | Liveness, and what the dashboard needs to start. Both stay open when `PRISM_SECRET` is set. |
+
+## Development
+
+```bash
+npm test
+```
+
+The tests need no network and no API keys; providers are exercised through the built-in mock. Node 20 or newer. Four runtime dependencies: express, better-sqlite3, helmet, dotenv. The dashboard is plain HTML, CSS and JavaScript with no build step.
 
 ## License
 

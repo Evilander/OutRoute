@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS battles (
   timestamp TEXT NOT NULL DEFAULT (datetime('now')),
   prompt TEXT NOT NULL,
   task_type TEXT DEFAULT 'general',
-  status TEXT DEFAULT 'pending'
+  status TEXT DEFAULT 'pending',   -- pending | voted (human) | revealed (identities shown without a vote)
+  origin TEXT DEFAULT 'arena'      -- arena | shadow | eval
 );
 
 -- Arena battle contestants (one row per model in a battle)
@@ -43,17 +44,24 @@ CREATE TABLE IF NOT EXISTS battle_entries (
   position INTEGER NOT NULL
 );
 
--- ELO ratings per model per task type
-CREATE TABLE IF NOT EXISTS elo_ratings (
-  model TEXT NOT NULL,
+-- Pairwise outcomes. Ratings are derived from this log, never stored.
+-- A human vote on an N-way battle yields winner-vs-each-loser rows; the judge
+-- yields one row per pair it actually compared.
+CREATE TABLE IF NOT EXISTS comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  battle_id INTEGER REFERENCES battles(id),
+  model_a TEXT NOT NULL,
+  model_b TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK (outcome IN ('a', 'b', 'tie')),
   task_type TEXT NOT NULL DEFAULT 'general',
-  rating REAL NOT NULL DEFAULT 1500,
-  wins INTEGER DEFAULT 0,
-  losses INTEGER DEFAULT 0,
-  battles INTEGER DEFAULT 0,
-  last_updated TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (model, task_type)
+  source TEXT NOT NULL CHECK (source IN ('human', 'judge')),
+  judge_model TEXT,
+  consistent INTEGER,              -- judge only: 1 when both presentation orders agreed
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_comparisons_battle ON comparisons(battle_id);
+CREATE INDEX IF NOT EXISTS idx_comparisons_task ON comparisons(task_type);
 
 -- Provider health status
 CREATE TABLE IF NOT EXISTS provider_health (
@@ -73,8 +81,8 @@ CREATE TABLE IF NOT EXISTS model_registry (
   provider_model_id TEXT NOT NULL,
   display_name TEXT NOT NULL,
   context_window INTEGER NOT NULL DEFAULT 4096,
-  price_prompt_1k REAL NOT NULL DEFAULT 0,
-  price_completion_1k REAL NOT NULL DEFAULT 0,
+  price_prompt_1k REAL,            -- NULL = price unknown
+  price_completion_1k REAL,
   is_active INTEGER DEFAULT 1,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -93,6 +101,8 @@ CREATE TABLE IF NOT EXISTS evaluations (
   reasoning TEXT,
   is_auto INTEGER DEFAULT 1,
   linked_manual_id INTEGER,
+  judge_consistency_score REAL,
+  cost_usd REAL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

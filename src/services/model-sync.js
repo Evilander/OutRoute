@@ -1,22 +1,35 @@
 import { upsertModels, deactivateStaleModels } from '../db/store.js';
+import { getOpenRouterCatalog } from '../proxy/providers/pricing.js';
+import { isChatModelId } from '../proxy/providers/base.js';
 
-const SYNC_INTERVAL = 12 * 60 * 60 * 1000; // 12 hours
-const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+const SYNC_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours once a sync has actually landed models
+// Backoff after a startup sync that returns zero models, instead of waiting the
+// full 12h interval for the next attempt: 30s, 2m, 10m, then settle at 30m.
+const RETRY_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
 
-// Filter out models that are too niche or have no pricing
+// A missing or unparsable price is null, not 0. The registry's price columns are
+// nullable for this reason: null means unknown, and 0 means the model is free.
+function parsePrice(raw) {
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 function isUsableModel(model) {
   if (!model.id) return false;
+  if (model.id.includes(':batch')) return false; // same model as the base entry, priced differently
+  if (!isChatModelId(model.id)) return false;
   if (!model.pricing) return false;
-  // Skip models with no pricing data
-  const prompt = parseFloat(model.pricing.prompt) || 0;
-  const completion = parseFloat(model.pricing.completion) || 0;
+  const prompt = parsePrice(model.pricing.prompt);
+  const completion = parsePrice(model.pricing.completion);
+  // Both fields explicitly parse to 0 (not just missing) and it's not a declared
+  // free variant: OpenRouter occasionally lists dead/placeholder entries this way.
   if (prompt === 0 && completion === 0 && !model.id.includes(':free')) return false;
   return true;
 }
 
 function mapOpenRouterModel(model) {
-  const prompt = parseFloat(model.pricing?.prompt) || 0;
-  const completion = parseFloat(model.pricing?.completion) || 0;
+  const prompt = parsePrice(model.pricing?.prompt);
+  const completion = parsePrice(model.pricing?.completion);
 
   return {
     id: model.id,
@@ -24,37 +37,19 @@ function mapOpenRouterModel(model) {
     providerModelId: model.id,
     displayName: model.name || model.id,
     contextWindow: model.context_length || 4096,
-    // OpenRouter pricing is per-token, convert to per-1k-tokens
-    pricePrompt1k: prompt * 1000,
-    priceCompletion1k: completion * 1000,
+    // OpenRouter pricing is per-token; the registry's convention is per-1k.
+    // A field that didn't parse stays null (unknown), never becomes a fabricated 0.
+    pricePrompt1k: prompt === null ? null : prompt * 1000,
+    priceCompletion1k: completion === null ? null : completion * 1000,
   };
 }
 
-async function fetchOpenRouterModels() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
-
-  try {
-    const response = await fetch(OPENROUTER_MODELS_URL, {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' },
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenRouter API returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.data || [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
+// Reuses pricing.js's OpenRouter fetch (and its in-memory cache) instead of
+// making a second, separate HTTP call to the same endpoint.
 export async function syncOpenRouterModels() {
   try {
     console.log('[model-sync] Syncing OpenRouter models...');
-    const rawModels = await fetchOpenRouterModels();
+    const rawModels = await getOpenRouterCatalog({ force: true });
     const usable = rawModels.filter(isUsableModel);
     const mapped = usable.map(mapOpenRouterModel);
 
@@ -80,9 +75,16 @@ export async function syncOpenRouterModels() {
 export class ModelSyncService {
   #timer = null;
   #hasApiKey = false;
+  #retryIndex = 0;
+  #retryDelaysMs;
+  #intervalMs;
 
-  constructor() {
+  // retryDelaysMs/intervalMs are only ever overridden by tests; production code
+  // always calls `new ModelSyncService()`.
+  constructor({ retryDelaysMs = RETRY_DELAYS_MS, intervalMs = SYNC_INTERVAL_MS } = {}) {
     this.#hasApiKey = Boolean(process.env.OPENROUTER_API_KEY);
+    this.#retryDelaysMs = retryDelaysMs;
+    this.#intervalMs = intervalMs;
   }
 
   async start() {
@@ -90,20 +92,32 @@ export class ModelSyncService {
       console.log('[model-sync] No OPENROUTER_API_KEY — skipping model sync');
       return;
     }
+    await this.#syncAndSchedule();
+  }
 
-    await syncOpenRouterModels();
+  async #syncAndSchedule() {
+    const count = await syncOpenRouterModels();
+    if (count > 0) {
+      this.#retryIndex = 0;
+      this.#scheduleNext(this.#intervalMs);
+    } else {
+      const delay = this.#retryDelaysMs[Math.min(this.#retryIndex, this.#retryDelaysMs.length - 1)];
+      this.#retryIndex++;
+      console.warn(`[model-sync] sync returned no models, retrying in ${Math.round(delay / 1000)}s`);
+      this.#scheduleNext(delay);
+    }
+  }
 
-    this.#timer = setInterval(() => {
-      syncOpenRouterModels().catch(err => {
-        console.error('[model-sync] Scheduled sync failed:', err.message);
-      });
-    }, SYNC_INTERVAL);
+  #scheduleNext(delayMs) {
+    this.#timer = setTimeout(() => {
+      this.#syncAndSchedule().catch(err => console.error('[model-sync] scheduled sync failed:', err.message));
+    }, delayMs);
     this.#timer.unref();
   }
 
   stop() {
     if (this.#timer) {
-      clearInterval(this.#timer);
+      clearTimeout(this.#timer);
       this.#timer = null;
     }
   }

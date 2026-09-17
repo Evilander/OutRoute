@@ -4,3 +4,8 @@ node_modules
 *.db-shm
 .env
 .git
+notes
+test
+.playwright-mcp
+ROADMAP.md
+CLAUDE.md

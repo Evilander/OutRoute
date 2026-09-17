@@ -2,169 +2,207 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prism — LLM Arena + Router</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Prism</title>
   <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/theme.js"></script>
 </head>
 <body>
-  <div class="app">
-    <header>
-      <div class="logo">
-        <div class="logo-icon">P</div>
-        <div>
-          <h1>Prism</h1>
-          <div class="logo-subtitle">LLM Arena + Intelligent Router</div>
-        </div>
-      </div>
-      <div class="header-actions">
-        <span id="provider-count" class="stat-label">Loading...</span>
-        <span id="uptime-badge" class="model-badge openai">Live</span>
-      </div>
-    </header>
+  <a class="skip" href="#main">Skip to content</a>
 
-    <div class="tabs">
-      <button class="tab active" data-tab="dashboard">Dashboard</button>
-      <button class="tab" data-tab="arena">Arena</button>
-      <button class="tab" data-tab="leaderboard">Leaderboard</button>
-      <button class="tab" data-tab="requests">Request Log</button>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="wordmark">
+        <h1>Prism</h1>
+        <p class="tagline">Which model is best for your work, and is it worth the price?</p>
+      </div>
+      <div class="status" id="status" aria-live="polite">
+        <span class="status-item" id="status-mode"></span>
+        <span class="status-item" id="status-models"></span>
+        <span class="status-item" id="status-judge"></span>
+        <span class="status-item" id="status-shadow"></span>
+        <button class="link-button" id="theme-toggle" type="button" aria-label="Switch colour theme">theme: auto</button>
+      </div>
     </div>
+    <div class="spectrum" aria-hidden="true"></div>
+  </header>
 
-    <!-- DASHBOARD TAB -->
-    <section id="tab-dashboard" class="section active">
-      <div class="stats-grid" id="stats-grid">
-        <div class="card">
-          <div class="card-title">Total Requests (24h)</div>
-          <div class="stat-value" id="stat-requests">0</div>
-          <div class="stat-label">across all providers</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Total Cost (24h)</div>
-          <div class="stat-value" id="stat-cost">$0.00</div>
-          <div class="stat-label">estimated USD</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Avg Latency</div>
-          <div class="stat-value" id="stat-latency">0ms</div>
-          <div class="stat-label">across all models</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Arena Battles</div>
-          <div class="stat-value" id="stat-battles">0</div>
-          <div class="stat-label">completed</div>
-        </div>
+  <nav class="tabs" aria-label="Sections">
+    <div class="tabs-inner" role="tablist">
+      <button class="tab" role="tab" id="tabbtn-compare" data-tab="compare" aria-controls="tab-compare" aria-selected="true">Compare</button>
+      <button class="tab" role="tab" id="tabbtn-ratings" data-tab="ratings" aria-controls="tab-ratings" aria-selected="false" tabindex="-1">Ratings</button>
+      <button class="tab" role="tab" id="tabbtn-frontier" data-tab="frontier" aria-controls="tab-frontier" aria-selected="false" tabindex="-1">Frontier</button>
+      <button class="tab" role="tab" id="tabbtn-judge" data-tab="judge" aria-controls="tab-judge" aria-selected="false" tabindex="-1">Judge</button>
+      <button class="tab" role="tab" id="tabbtn-traffic" data-tab="traffic" aria-controls="tab-traffic" aria-selected="false" tabindex="-1">Traffic</button>
+    </div>
+  </nav>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main id="main">
+    <!-- Compare -->
+    <section class="panel" id="tab-compare" role="tabpanel" aria-labelledby="tabbtn-compare">
+      <div class="lede">
+        <h2>Compare models blind</h2>
+        <p>Send one prompt to several models. The responses come back unlabelled; pick the one you would rather have received. Every pick sharpens the ratings the router acts on.</p>
       </div>
 
-      <div class="card-title" style="margin-bottom: 12px;">Provider Health</div>
-      <div class="providers-grid" id="providers-grid">
-        <div class="card loading-overlay"><div class="spinner"></div> Loading providers...</div>
-      </div>
+      <form class="compose" id="compose">
+        <label class="field-label" for="prompt">Prompt</label>
+        <textarea id="prompt" rows="5" placeholder="Use a prompt from your real work. The ratings are only as representative as the prompts." required></textarea>
 
-      <div class="two-col">
-        <div class="card">
-          <div class="card-title">Cost by Provider (24h)</div>
-          <div id="cost-breakdown">
-            <div class="loading-overlay"><div class="spinner"></div></div>
+        <div class="compose-row">
+          <fieldset class="models" id="models">
+            <legend class="field-label">Models <span class="hint" id="models-hint">pick 2 to 4</span></legend>
+            <div class="model-list" id="model-list"></div>
+          </fieldset>
+          <div class="compose-side">
+            <label class="field-label" for="task-type">Task type</label>
+            <select id="task-type">
+              <option value="">Detect from prompt</option>
+            </select>
+            <button class="button primary" id="run" type="submit">Run comparison</button>
+            <p class="hint" id="compose-status" role="status"></p>
           </div>
         </div>
-        <div class="card">
-          <div class="card-title">Model Usage</div>
-          <div id="model-usage">
-            <div class="loading-overlay"><div class="spinner"></div></div>
-          </div>
-        </div>
-      </div>
-    </section>
+      </form>
 
-    <!-- ARENA TAB -->
-    <section id="tab-arena" class="section">
-      <div class="arena-container">
-        <div class="card">
-          <div class="card-title">New Battle</div>
-          <div class="arena-input">
-            <textarea id="arena-prompt" placeholder="Enter a prompt to race across models...&#10;&#10;Try something like:&#10;• Explain quantum computing in simple terms&#10;• Write a Python function to find the longest palindrome&#10;• What are the pros and cons of microservices?"></textarea>
-          </div>
-          <div class="arena-controls" style="margin-top: 16px;">
-            <div class="card-title" style="margin-bottom: 4px;">Select Models</div>
-            <div class="model-selector" id="model-selector">
-              <div class="loading-overlay"><div class="spinner"></div></div>
-            </div>
-            <div style="display: flex; gap: 12px; margin-top: 12px; align-items: center;">
-              <button class="btn btn-primary" id="btn-battle">Start Battle</button>
-              <span id="battle-status" class="stat-label"></span>
-            </div>
-          </div>
+      <section class="battle" id="battle" hidden aria-live="polite">
+        <div class="battle-head">
+          <h3 id="battle-title">Which response is better?</h3>
+          <p class="hint" id="battle-hint">Keys 1 to 9 pick a response, T calls it a tie.</p>
         </div>
-
-        <div id="battle-results" style="display: none;">
-          <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-              <div>
-                <div class="card-title" style="margin-bottom: 2px;">Battle Results — Vote for the best response</div>
-                <div class="stat-label" id="keyboard-hint">Press 1, 2, 3... to vote by keyboard</div>
-              </div>
-              <div style="display: flex; gap: 8px;">
-                <button class="btn btn-secondary" id="btn-copy-result" style="display: none;">Copy Result</button>
-                <button class="btn btn-secondary" id="btn-reveal" style="display: none;">Reveal Models</button>
-              </div>
-            </div>
-            <div class="battle-responses" id="battle-responses"></div>
-          </div>
+        <div class="responses" id="responses"></div>
+        <div class="battle-actions" id="battle-actions">
+          <button class="button" id="vote-tie" type="button">Tie</button>
+          <button class="link-button" id="forfeit" type="button">Reveal without voting</button>
         </div>
+        <div class="verdict" id="verdict" hidden></div>
+      </section>
 
-        <div class="card">
-          <div class="card-title">Recent Battles</div>
-          <div id="recent-battles">
-            <div class="empty-state">
-              <h3>No battles yet</h3>
-              <p>Start a battle above to see results here</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- LEADERBOARD TAB -->
-    <section id="tab-leaderboard" class="section">
-      <div class="card">
-        <div class="card-title">ELO Leaderboard</div>
-        <div id="leaderboard-content">
-          <div class="empty-state">
-            <h3>No ratings yet</h3>
-            <p>Run arena battles and vote to build your personal leaderboard</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- REQUESTS TAB -->
-    <section id="tab-requests" class="section">
-      <div class="card">
-        <div class="card-title">Recent Requests</div>
+      <section class="history">
+        <h3>Recent comparisons</h3>
         <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Provider</th>
-                <th>Model</th>
-                <th>Strategy</th>
-                <th>Tokens</th>
-                <th>Latency</th>
-                <th>Cost</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="requests-table">
-              <tr><td colspan="8" class="empty-state">No requests yet</td></tr>
-            </tbody>
+          <table id="history-table">
+            <thead><tr><th>When</th><th>Prompt</th><th>Task</th><th>Origin</th><th>Outcome</th></tr></thead>
+            <tbody></tbody>
           </table>
         </div>
+      </section>
+    </section>
+
+    <!-- Ratings -->
+    <section class="panel" id="tab-ratings" role="tabpanel" aria-labelledby="tabbtn-ratings" hidden>
+      <div class="lede">
+        <h2>Ratings</h2>
+        <p class="finding" id="ratings-finding"></p>
+      </div>
+
+      <div class="filters">
+        <label>Task <select id="ratings-task"></select></label>
+        <label>Evidence
+          <select id="ratings-source">
+            <option value="all">My votes and the judge</option>
+            <option value="human">My votes only</option>
+            <option value="judge">Judge only</option>
+          </select>
+        </label>
+        <span class="hint" id="ratings-count"></span>
+      </div>
+
+      <figure class="figure">
+        <div id="ratings-plot" class="plot"></div>
+        <figcaption>
+          <strong>Fig. 1.</strong> Bradley-Terry ratings fitted to every comparison at once. The bar through each point is a 95% bootstrap interval. Where two bars overlap, the data cannot yet tell those models apart, whatever the order says. Hollow points have too few games to route on.
+        </figcaption>
+      </figure>
+    </section>
+
+    <!-- Frontier -->
+    <section class="panel" id="tab-frontier" role="tabpanel" aria-labelledby="tabbtn-frontier" hidden>
+      <div class="lede">
+        <h2>Cost against quality</h2>
+        <p class="finding" id="frontier-finding"></p>
+      </div>
+
+      <div class="filters">
+        <label>Task <select id="frontier-task"></select></label>
+      </div>
+
+      <figure class="figure">
+        <div id="frontier-plot" class="plot"></div>
+        <figcaption>
+          <strong>Fig. 2.</strong> Each rated model by price (input and output blended 3:1, log scale) and rating with its 95% interval. Filled points are on the frontier: nothing else is both cheaper and rated higher. The <code>value</code> strategy goes one step further and picks the cheapest model it cannot say is worse than the leader.
+        </figcaption>
+      </figure>
+
+      <div class="table-wrap">
+        <table id="frontier-table">
+          <thead><tr><th>Model</th><th>Provider</th><th class="num">Rating</th><th class="num">95% interval</th><th class="num">Games</th><th class="num">$ / 1M in</th><th class="num">$ / 1M out</th><th>Frontier</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
-  </div>
 
+    <!-- Judge -->
+    <section class="panel" id="tab-judge" role="tabpanel" aria-labelledby="tabbtn-judge" hidden>
+      <div class="lede">
+        <h2>Can you trust the judge?</h2>
+        <p>An LLM judge lets ratings build without you voting on everything, but judges have known biases. Prism measures this one against the only authority that matters here: you. Vote on comparisons the judge has also ruled on and these numbers fill in.</p>
+      </div>
+      <div class="tiles" id="judge-tiles"></div>
+      <div class="notes" id="judge-notes"></div>
+    </section>
+
+    <!-- Traffic -->
+    <section class="panel" id="tab-traffic" role="tabpanel" aria-labelledby="tabbtn-traffic" hidden>
+      <div class="lede">
+        <h2>Traffic</h2>
+        <p>Requests through <code>/v1/chat/completions</code> in the last 24 hours.</p>
+      </div>
+      <div class="tiles" id="traffic-tiles"></div>
+
+      <div class="two-col">
+        <figure class="figure">
+          <div id="spend-plot" class="plot"></div>
+          <figcaption><strong>Fig. 3.</strong> Spend by model, last 24 hours.</figcaption>
+        </figure>
+        <div>
+          <h3>Shadow evaluation</h3>
+          <div id="shadow-panel" class="notes"></div>
+          <h3>Providers</h3>
+          <ul class="providers" id="providers"></ul>
+        </div>
+      </div>
+
+      <h3>Request log</h3>
+      <div class="table-wrap">
+        <table id="requests-table">
+          <thead><tr><th>Time</th><th>Model</th><th>Strategy</th><th>Why</th><th class="num">Tokens</th><th class="num">Latency</th><th class="num">Cost</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <p>Prism <span id="version"></span>. Everything on this page is stored in a SQLite file on this machine.</p>
+  </footer>
+
+  <dialog id="auth-dialog">
+    <form method="dialog" id="auth-form">
+      <h3>This server needs a token</h3>
+      <p>Enter the value of <code>PRISM_SECRET</code>. It is kept for this browser tab only.</p>
+      <input type="password" id="auth-token" autocomplete="off" required aria-label="Access token">
+      <p class="hint error" id="auth-error" role="alert"></p>
+      <button class="button primary" type="submit">Continue</button>
+    </form>
+  </dialog>
+
+  <div class="tooltip" id="tooltip" role="status" hidden></div>
+
+  <script src="/dashboard/charts.js"></script>
   <script src="/dashboard/app.js"></script>
 </body>
 </html>

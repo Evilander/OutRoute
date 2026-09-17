@@ -1,20 +1,23 @@
 {
   "name": "prism",
-  "version": "0.1.0",
-  "description": "Intelligent LLM arena + router. Race models, learn preferences, route smart.",
+  "version": "0.2.0",
+  "description": "Find out which LLM is best for your own work, with error bars, then route on it.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test test/basic.test.js"
+    "demo": "node bin/prism.js demo",
+    "test": "node --test"
   },
   "keywords": [
     "llm",
-    "ai",
+    "evaluation",
+    "bradley-terry",
     "router",
     "arena",
-    "proxy"
+    "llm-as-judge",
+    "openai-compatible"
   ],
   "license": "MIT",
   "dependencies": {
@@ -22,5 +25,11 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0"
+  },
+  "bin": {
+    "prism": "bin/prism.js"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

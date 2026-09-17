@@ -1,8 +1,10 @@
 services:
   prism:
     build: .
+    # Published on loopback only. Prism holds your provider keys; to expose it to
+    # other machines, change the bind address and set PRISM_SECRET.
     ports:
-      - "${PORT:-3080}:3080"
+      - "127.0.0.1:${PORT:-3080}:3080"
     volumes:
       - prism-data:/data
     env_file:
@@ -10,6 +12,8 @@ services:
     environment:
       - DB_PATH=/data/prism.db
       - HOST=0.0.0.0
+      - PORT=3080
+      - ALLOWED_HOSTS=localhost,127.0.0.1
     restart: unless-stopped
 
 volumes:

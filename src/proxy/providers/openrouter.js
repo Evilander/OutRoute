@@ -1,14 +1,19 @@
 import { OpenAIProvider } from './openai.js';
+import { ProviderError } from './base.js';
 import { getRegistryModels } from '../../db/store.js';
 
 export class OpenRouterProvider extends OpenAIProvider {
   constructor(config = {}) {
     super({
       ...config,
-      apiKey: config.apiKey || process.env.OPENROUTER_API_KEY || '',
+      // Distinguish "not provided" (fall back to the env var) from an explicit
+      // empty string (force unavailable) — an `||` here would let an env var
+      // silently override a caller's deliberate override, same fix as base.js's
+      // own OpenAIProvider constructor already makes for the base apiKey.
+      apiKey: config.apiKey !== undefined ? config.apiKey : (process.env.OPENROUTER_API_KEY || ''),
       baseUrl: config.baseUrl || 'https://openrouter.ai/api/v1',
       providerName: 'openrouter',
-      models: [], // populated dynamically from DB
+      models: [], // populated dynamically from the DB registry, not a fallback list
     });
   }
 
@@ -17,8 +22,7 @@ export class OpenRouterProvider extends OpenAIProvider {
   }
 
   get models() {
-    const rows = getRegistryModels('openrouter');
-    return rows.map(r => ({
+    return getRegistryModels('openrouter').map(r => ({
       id: r.id,
       name: r.display_name,
       contextWindow: r.context_window,
@@ -32,13 +36,8 @@ export class OpenRouterProvider extends OpenAIProvider {
   }
 
   ownsModel(modelId) {
-    // OpenRouter model IDs contain a slash (e.g., meta-llama/llama-3-8b-instruct)
-    // Also check the registry directly for performance
-    if (modelId.includes('/')) {
-      const model = this.getModel(modelId);
-      return model !== null;
-    }
-    return false;
+    // OpenRouter model IDs contain a slash (e.g., meta-llama/llama-3-8b-instruct).
+    return typeof modelId === 'string' && modelId.includes('/') && this.getModel(modelId) !== null;
   }
 
   buildHeaders() {
@@ -48,10 +47,31 @@ export class OpenRouterProvider extends OpenAIProvider {
     return headers;
   }
 
-  buildRequestBody(messages, options) {
-    const body = super.buildRequestBody(messages, options);
-    // OpenRouter uses the full model ID including org prefix
-    body.model = options.model;
+  buildRequestBody(messages, options, extra) {
+    // Must forward `extra` ({omit}) to super — OpenAIProvider.chat()'s retry-
+    // without-the-rejected-param path calls buildRequestBody(messages, opts, {omit})
+    // a second time; dropping the 3rd arg here made every retry resend the exact
+    // body that just 400'd, silently defeating the retry for this provider only.
+    const body = super.buildRequestBody(messages, options, extra);
+    // OpenRouter uses the full model ID including org prefix; never let a missing
+    // options.model silently drop the field super's fallback filled in.
+    body.model = options.model || body.model;
     return body;
   }
+
+  // OpenRouter has no static fallback model (its catalog is DB-driven), so unlike
+  // every other adapter, `options.model` is not optional here — without this guard
+  // a caller that omits it would silently send a body with no `model` field at all.
+  async chat(messages, options = {}) {
+    if (!options.model) {
+      throw new ProviderError('OpenRouter requires an explicit model id', {
+        provider: this.name, model: options.model, status: 400, retryable: false,
+      });
+    }
+    return super.chat(messages, options);
+  }
+
+  // The registry is kept current by ModelSyncService on its own schedule (with
+  // startup backoff) — this provider doesn't duplicate that fetch itself.
+  async discoverModels() {}
 }

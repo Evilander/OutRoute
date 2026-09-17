@@ -1,44 +1,32 @@
 import { Router } from 'express';
-import { runBattle, voteBattle } from './arena.js';
-import { getLeaderboard } from './scorer.js';
-import { getBattle, getRecentBattles, getEvaluation } from '../db/store.js';
-import { initSession, getSession, streamCombatant, finalizeSession } from './streaming.js';
+import { runBattle, voteBattle, dedupeModels, isErroredEntry } from './arena.js';
+import { getBattle, getRecentBattles, getEvaluation, getJudgeConsistency, getJudgeLengthBias, setBattleStatus } from '../db/store.js';
+import { getLeaderboard, getRatings, judgeAgreement, MIN_GAMES } from './ratings.js';
+import { initSession, streamCombatant, finalizeSession } from './streaming.js';
 import { createRateLimiter } from '../proxy/server.js';
+import { TASK_TYPES } from '../tasks.js';
 
-const VALID_TASK_TYPES = new Set(['general', 'code', 'creative', 'analysis', 'factual']);
+// Starting a comparison spends money, so it is limited tightly. Voting, revealing
+// and finalizing cost nothing and happen in bursts: a person votes, the page
+// reveals, then polls for the judge's verdict.
 const arenaLimiter = createRateLimiter(60_000, 10);
+const voteLimiter = createRateLimiter(60_000, 240);
 
-const DEFAULT_MODELS = [
-  'gpt-4o',
-  'claude-sonnet-4-6',
-  'gemini-2.5-flash',
-  'llama-3.3-70b-versatile',
-  'claude-haiku-4-5-20251001',
-];
+const DEFAULT_MODELS = ['gpt-6-astra', 'claude-sonnet-5', 'gemini-3.8-flash', 'claude-haiku-4-5', 'mock-balanced'];
 
 function autoSelectModels(providers, count = 3) {
-  // Build a pool of models grouped by provider for diversity
   const byProvider = [];
   for (const [name, provider] of providers) {
-    if (provider.models && provider.models.length > 0) {
-      // Pick one model per provider (cheapest/most capable heuristic: first in list)
-      byProvider.push({ provider: name, models: [...provider.models] });
-    }
+    if (provider.models?.length > 0) byProvider.push({ provider: name, models: [...provider.models] });
   }
+  if (byProvider.length === 0) return DEFAULT_MODELS.slice(0, count);
 
-  if (byProvider.length === 0) {
-    return DEFAULT_MODELS.slice(0, count);
-  }
-
-  // Round-robin across providers to maximize diversity, shuffle within each
   for (const p of byProvider) {
     for (let i = p.models.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [p.models[i], p.models[j]] = [p.models[j], p.models[i]];
     }
   }
-
-  // Shuffle provider order for variety
   for (let i = byProvider.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [byProvider[i], byProvider[j]] = [byProvider[j], byProvider[i]];
@@ -51,120 +39,124 @@ function autoSelectModels(providers, count = 3) {
     for (const p of byProvider) {
       if (selected.length >= count) break;
       if (round < p.models.length) {
-        selected.push(p.models[round].id || p.models[round]);
+        selected.push(p.models[round].id);
         added = true;
       }
     }
     if (!added) break;
     round++;
   }
-
-  return selected.slice(0, count);
+  return dedupeModels(selected).slice(0, count);
 }
 
-let autoJudge = null;
-
-export function setAutoJudge(judge) {
-  autoJudge = judge;
+// `|| default` would coerce an explicit 0 to the default (0 is a valid
+// temperature). NaN is the only case that should fall back. Exported for
+// direct unit testing of the falsy-zero edge case.
+export function clampTemperature(value) {
+  if (value === undefined) return 0.7;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(2, n)) : 0.7;
 }
 
-export function createArenaRouter(providers) {
+export function clampMaxTokens(value) {
+  if (value === undefined) return 1024;
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) ? 1024 : Math.min(Math.max(1, n), 16384);
+}
+
+// Deduplicate before truncating to 8: slicing the raw list first can drop a
+// genuinely distinct model that only appears after 8 duplicates of another.
+export function parseModelList(models) {
+  if (!Array.isArray(models)) return [];
+  return dedupeModels(models.filter(m => typeof m === 'string' && m.length <= 100)).slice(0, 8);
+}
+
+function sendError(res, err, fallback) {
+  console.error(`[arena] ${fallback}:`, err.message);
+  res.status(err.status || 500).json({ error: err.status ? err.message : fallback });
+}
+
+export function createArenaRouter(providers, { autoJudge } = {}) {
   const router = Router();
 
   router.post('/battle', arenaLimiter, async (req, res) => {
     try {
       const { prompt, models, taskType, maxTokens, temperature } = req.body;
-      const safeTaskType = VALID_TASK_TYPES.has(taskType) ? taskType : 'general';
-
       if (!prompt || (typeof prompt !== 'string' && !Array.isArray(prompt))) {
         return res.status(400).json({ error: 'prompt is required (string or message array)' });
       }
 
-      const selectedModels = models && models.length > 0
-        ? models.slice(0, 8).filter(m => typeof m === 'string' && m.length <= 100)
-        : autoSelectModels(providers);
-
+      // Auto-select only when the caller named no models at all. A caller who
+      // names one (or two duplicates that collapse to one) gets a 400, not a
+      // silent substitution of models they didn't ask for.
+      const requested = parseModelList(models);
+      const selectedModels = requested.length > 0 ? requested : autoSelectModels(providers);
       if (selectedModels.length < 2) {
-        return res.status(400).json({ error: 'At least 2 models are required for a battle' });
+        return res.status(400).json({ error: 'At least 2 distinct models are required for a battle' });
       }
 
       const result = await runBattle(prompt, selectedModels, providers, {
-        taskType: safeTaskType,
-        maxTokens: maxTokens || 1024,
-        temperature: temperature ?? 0.7,
+        taskType: TASK_TYPES.includes(taskType) ? taskType : undefined,
+        maxTokens: clampMaxTokens(maxTokens),
+        temperature: clampTemperature(temperature),
       });
 
-      // Return anonymized entries (no model/provider info, just position + response)
+      // Blind: no model, provider, cost or token counts. Latency is fine, and a
+      // failed combatant is flagged structurally, never via leaked "[ERROR]" text.
       const blindEntries = result.entries.map(e => ({
         id: e.entryId,
         position: e.position,
         response: e.response,
         latencyMs: e.latencyMs,
-        costUsd: e.cost,
-        error: e.error || null,
+        error: e.error,
       }));
 
-      // Auto-judge in background if available and autoJudge is enabled
-      if (autoJudge && autoJudge.available && req.body.autoJudge !== false) {
-        autoJudge.enqueue(result.battleId);
-      }
+      if (autoJudge?.available && req.body.autoJudge !== false) autoJudge.enqueue(result.battleId);
 
       res.json({
         battleId: result.battleId,
+        taskType: result.taskType,
         entries: blindEntries,
         autoJudge: autoJudge?.available ? 'queued' : 'unavailable',
       });
     } catch (err) {
-      console.error('[Arena] Battle error:', err.message);
-      res.status(500).json({ error: 'Battle failed' });
+      sendError(res, err, 'Battle failed');
     }
   });
 
-  router.post('/vote', async (req, res) => {
+  router.post('/vote', voteLimiter, (req, res) => {
     try {
-      const { battleId, winnerPosition } = req.body;
-
-      if (!battleId || !winnerPosition) {
-        return res.status(400).json({ error: 'battleId and winnerPosition are required' });
+      const { battleId, winnerPosition, tie } = req.body;
+      const id = Number(battleId);
+      if (!Number.isInteger(id)) return res.status(400).json({ error: 'battleId is required' });
+      if (!tie && !Number.isInteger(winnerPosition)) {
+        return res.status(400).json({ error: 'winnerPosition (or tie: true) is required' });
       }
 
-      const battle = getBattle(battleId);
-      if (!battle) {
-        return res.status(404).json({ error: `Battle ${battleId} not found` });
-      }
-
-      const winnerEntry = battle.entries.find(e => e.position === winnerPosition);
-      if (!winnerEntry) {
-        return res.status(400).json({
-          error: `No entry at position ${winnerPosition} in battle ${battleId}`,
-        });
-      }
-
-      const leaderboard = await voteBattle(battleId, winnerEntry.id);
-
-      res.json({
-        success: true,
-        leaderboard,
-      });
+      const result = voteBattle(id, { winnerPosition, tie: Boolean(tie) });
+      res.json({ success: true, ...result });
     } catch (err) {
-      console.error('[Arena] Vote error:', err.message);
-      const status = err.message?.includes('already been voted') ? 409 : 500;
-      const safeMsg = status === 409 ? 'This battle has already been voted on' : 'Vote failed';
-      res.status(status).json({ error: safeMsg });
+      sendError(res, err, 'Vote failed');
     }
   });
 
-  router.get('/reveal/:battleId', (req, res) => {
+  router.get('/reveal/:battleId', voteLimiter, (req, res) => {
     try {
       const battleId = Number(req.params.battleId);
+      if (!Number.isInteger(battleId)) return res.status(400).json({ error: 'invalid battle id' });
+
       const battle = getBattle(battleId);
+      if (!battle) return res.status(404).json({ error: `Battle ${battleId} not found` });
 
-      if (!battle) {
-        return res.status(404).json({ error: `Battle ${battleId} not found` });
-      }
-
-      if (battle.status !== 'voted') {
-        return res.status(403).json({ error: 'Vote on this battle before revealing model identities' });
+      // Shadow/eval battles have no human voter to wait on, so they are always
+      // revealable. An arena battle needs a vote, or an explicit forfeit.
+      const origin = battle.origin || 'arena';
+      if (origin === 'arena' && battle.status === 'pending') {
+        if (req.query.forfeit !== '1') {
+          return res.status(403).json({ error: 'Vote on this battle before revealing model identities, or pass ?forfeit=1' });
+        }
+        setBattleStatus(battleId, 'revealed');
+        battle.status = 'revealed';
       }
 
       const entries = battle.entries.map(e => ({
@@ -174,36 +166,58 @@ export function createArenaRouter(providers) {
         latencyMs: e.latency_ms,
         costUsd: e.cost_usd,
         isWinner: !!e.is_winner,
+        error: isErroredEntry({ response: e.response }),
       }));
 
       const evaluation = getEvaluation(battleId);
-
       res.json({
         battleId,
         prompt: battle.prompt,
         taskType: battle.task_type,
         status: battle.status,
+        origin,
         entries,
         ...(evaluation ? {
           judgeReasoning: evaluation.reasoning,
           judgeModel: evaluation.judge_model,
           inferredDomain: evaluation.inferred_domain,
+          winnerModel: evaluation.winner_model,
         } : {}),
       });
     } catch (err) {
-      console.error('[Arena] Reveal error:', err.message);
-      res.status(500).json({ error: 'Internal server error' });
+      sendError(res, err, 'Internal server error');
     }
   });
 
   router.get('/leaderboard', (req, res) => {
     try {
-      const taskType = req.query.taskType || null;
-      const leaderboard = getLeaderboard(taskType);
-      res.json({ leaderboard });
+      const taskType = TASK_TYPES.includes(req.query.taskType) ? req.query.taskType : null;
+      const sourceParam = req.query.source;
+      const sources = sourceParam === 'human' ? ['human'] : sourceParam === 'judge' ? ['judge'] : ['human', 'judge'];
+
+      const ratings = getRatings(taskType, { sources });
+      res.json({
+        leaderboard: getLeaderboard(taskType, { sources }),
+        taskType: taskType || 'overall',
+        comparisons: ratings.comparisons,
+        minGames: MIN_GAMES,
+      });
     } catch (err) {
-      console.error('[Arena] Leaderboard error:', err.message);
-      res.status(500).json({ error: 'Internal server error' });
+      sendError(res, err, 'Internal server error');
+    }
+  });
+
+  router.get('/judge', (req, res) => {
+    try {
+      const { pairs, longerWins } = getJudgeLengthBias();
+      res.json({
+        judge: autoJudge?.available ? autoJudge.judgeInfo : { provider: null, model: null },
+        agreement: judgeAgreement(),
+        consistency: getJudgeConsistency(),
+        lengthBias: { judged: pairs, pickedLonger: longerWins, rate: pairs ? Math.round((longerWins / pairs) * 1000) / 1000 : null },
+      });
+    } catch (err) {
+      sendError(res, err, 'Internal server error');
     }
   });
 
@@ -217,58 +231,53 @@ export function createArenaRouter(providers) {
         prompt: b.prompt,
         taskType: b.task_type,
         status: b.status,
+        origin: b.origin,
         timestamp: b.timestamp,
         entryCount: b.entries.length,
         entries: b.entries.map(e => ({
           id: e.id,
           position: e.position,
-          model: b.status === 'voted' ? e.model : undefined,
-          provider: b.status === 'voted' ? e.provider : undefined,
+          // Blind while pending: identity, cost and tokens only appear once a
+          // battle has a verdict or has been explicitly revealed.
+          model: b.status === 'pending' ? undefined : e.model,
+          provider: b.status === 'pending' ? undefined : e.provider,
           latencyMs: e.latency_ms,
-          costUsd: e.cost_usd,
+          costUsd: b.status === 'pending' ? undefined : e.cost_usd,
           isWinner: !!e.is_winner,
         })),
       }));
 
       res.json({ battles: sanitized });
     } catch (err) {
-      console.error('[Arena] Battles list error:', err.message);
-      res.status(500).json({ error: 'Internal server error' });
+      sendError(res, err, 'Internal server error');
     }
   });
 
   router.post('/session', arenaLimiter, (req, res) => {
     try {
       const { prompt, models, taskType, maxTokens, temperature } = req.body;
-      const safeTaskType = VALID_TASK_TYPES.has(taskType) ? taskType : 'general';
-
-      if (!prompt) {
-        return res.status(400).json({ error: 'prompt is required' });
+      if (!prompt || (typeof prompt !== 'string' && !Array.isArray(prompt))) {
+        return res.status(400).json({ error: 'prompt is required (string or message array)' });
       }
 
-      const selectedModels = models && models.length >= 2
-        ? models.slice(0, 8).filter(m => typeof m === 'string' && m.length <= 100)
-        : autoSelectModels(providers);
-
+      const requested = parseModelList(models);
+      const selectedModels = requested.length > 0 ? requested : autoSelectModels(providers);
       if (selectedModels.length < 2) {
-        return res.status(400).json({ error: 'At least 2 models are required' });
+        return res.status(400).json({ error: 'At least 2 distinct models are required' });
       }
 
       const session = initSession(prompt, selectedModels, providers, {
-        taskType: safeTaskType,
-        maxTokens: maxTokens || 1024,
-        temperature: temperature ?? 0.7,
+        taskType: TASK_TYPES.includes(taskType) ? taskType : undefined,
+        maxTokens: clampMaxTokens(maxTokens),
+        temperature: clampTemperature(temperature),
       });
-
       res.json(session);
     } catch (err) {
-      console.error('[Arena] Session init error:', err.message);
-      res.status(500).json({ error: 'Session init failed' });
+      sendError(res, err, 'Session init failed');
     }
   });
 
-  // Stream a single combatant's response (SSE)
-  router.get('/stream/:sessionId/:combatantId', async (req, res) => {
+  router.get('/stream/:sessionId/:combatantId', voteLimiter, async (req, res) => {
     const { sessionId, combatantId } = req.params;
 
     res.setHeader('Content-Type', 'text/event-stream');
@@ -276,13 +285,16 @@ export function createArenaRouter(providers) {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
 
+    const controller = new AbortController();
     let aborted = false;
-    req.on('close', () => { aborted = true; });
+    req.on('close', () => {
+      aborted = true;
+      controller.abort();
+    });
 
     try {
-      for await (const chunk of streamCombatant(sessionId, combatantId)) {
+      for await (const chunk of streamCombatant(sessionId, combatantId, controller.signal)) {
         if (aborted) break;
-
         if (chunk.type === 'delta') {
           res.write(`data: ${JSON.stringify({ type: 'delta', content: chunk.content })}\n\n`);
         } else if (chunk.type === 'done') {
@@ -292,38 +304,22 @@ export function createArenaRouter(providers) {
         }
       }
     } catch (err) {
-      if (!aborted) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
-      }
+      if (!aborted) res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
     }
 
-    res.write('data: [DONE]\n\n');
+    if (!aborted) {
+      res.write('data: [DONE]\n\n');
+    }
     res.end();
   });
 
-  // Finalize a streaming session (stores entries in DB, returns battleId for voting)
-  router.post('/session/:sessionId/finalize', (req, res) => {
+  router.post('/session/:sessionId/finalize', voteLimiter, (req, res) => {
     try {
-      const { sessionId } = req.params;
-      const session = getSession(sessionId);
-      if (!session) {
-        return res.status(404).json({ error: 'Session not found' });
-      }
-
-      const battleId = finalizeSession(sessionId);
-
-      // Auto-judge in background if available
-      if (autoJudge && autoJudge.available) {
-        autoJudge.enqueue(battleId);
-      }
-
-      res.json({
-        battleId,
-        autoJudge: autoJudge?.available ? 'queued' : 'unavailable',
-      });
+      const battleId = finalizeSession(req.params.sessionId);
+      if (autoJudge?.available) autoJudge.enqueue(battleId);
+      res.json({ battleId, autoJudge: autoJudge?.available ? 'queued' : 'unavailable' });
     } catch (err) {
-      console.error('[Arena] Session finalize error:', err.message);
-      res.status(500).json({ error: 'Session finalize failed' });
+      sendError(res, err, 'Session finalize failed');
     }
   });
 
