@@ -10,10 +10,14 @@ node_modules/
 CLAUDE.md
 AGENTS.md
 codex.md
-HANDOFF.md
+*HANDOFF*.md
+ROADMAP.md
 .claude/
 .codex/
 .agents/
 notes/
 todos/
 docs/superpowers/
+
+# Local tool output
+.playwright-mcp/
