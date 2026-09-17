@@ -109,12 +109,16 @@ describe('base.js helpers', () => {
     const restore = stubFetch((url, opts) => new Promise((_resolve, reject) => {
       opts.signal.addEventListener('abort', () => reject(opts.signal.reason));
     }));
+    // The timeout timer is unref'd, so without this nothing holds the event loop open
+    // while the test waits for it, and Node 22 ends the file early.
+    const keepAlive = setInterval(() => {}, 1_000);
     try {
       await assert.rejects(
         () => provider.fetchWithTimeout('http://example.test', {}, 10),
         err => err.name === 'TimeoutError',
       );
     } finally {
+      clearInterval(keepAlive);
       restore();
     }
   });
@@ -904,7 +908,9 @@ describe('model-sync.js', () => {
     const service = new modelSync.ModelSyncService({ retryDelaysMs: [5, 5, 5], intervalMs: 5_000 });
     try {
       await service.start();
-      await new Promise(resolve => setTimeout(resolve, 80));
+      // Far below the 5s interval, far above what a slow CI runner needs for two 5ms retries.
+      const deadline = Date.now() + 2_000;
+      while (calls < 3 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
       assert.ok(calls >= 3, `expected at least 3 sync attempts, got ${calls}`);
     } finally {
       service.stop();
